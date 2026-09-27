@@ -5,6 +5,9 @@ import {
   canSelectSession,
   categorizeSessionTime,
   formatSessionTimestamp,
+  getSessionDisplayTitle,
+  matchesSessionSearch,
+  normalizeSessionName,
 } from '@features/sessions/SessionSidebar';
 import {
   canStartNewConversation,
@@ -57,7 +60,8 @@ test('formatSessionTimestamp: formats time for today and date for older sessions
   assert.strictEqual(formatSessionTimestamp('not-a-date'), '');
 });
 
-test('SessionSidebar: search filtering logic matches first message or session id', () => {
+test('SessionSidebar: search filtering logic matches first message, session id, or custom title', () => {
+  // Exercises the real matchesSessionSearch, not a hand-reimplementation of the filter.
   const sessions: SessionSummary[] = [
     {
       id: 'sess-alpha',
@@ -80,13 +84,17 @@ test('SessionSidebar: search filtering logic matches first message or session id
       messageCount: 1,
       isActive: false,
     },
+    {
+      id: 'sess-delta',
+      path: '/path/4.jsonl',
+      firstMessage: 'Some unrelated first message',
+      messageCount: 3,
+      isActive: false,
+      customTitle: 'Deploy pipeline notes',
+    },
   ];
 
-  const filter = (query: string) => {
-    const q = query.trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter((s) => s.firstMessage.toLowerCase().includes(q) || s.id.toLowerCase().includes(q));
-  };
+  const filter = (query: string) => sessions.filter((s) => matchesSessionSearch(s, query));
 
   // Match by keyword in firstMessage
   assert.strictEqual(filter('navigation').length, 1);
@@ -100,11 +108,62 @@ test('SessionSidebar: search filtering logic matches first message or session id
   assert.strictEqual(filter('README').length, 1);
   assert.strictEqual(filter('README')[0].id, 'sess-gamma');
 
+  // Match by customTitle even when firstMessage does not contain the query
+  assert.strictEqual(filter('deploy').length, 1);
+  assert.strictEqual(filter('deploy')[0].id, 'sess-delta');
+
   // Non-matching query
   assert.strictEqual(filter('nonexistent-term').length, 0);
 
   // Empty query returns all
-  assert.strictEqual(filter('   ').length, 3);
+  assert.strictEqual(filter('   ').length, 4);
+});
+
+test('getSessionDisplayTitle: prefers a non-blank customTitle over firstMessage', () => {
+  const withCustomTitle: SessionSummary = {
+    id: 'sess-1',
+    path: '/p.jsonl',
+    firstMessage: 'Original first message',
+    messageCount: 3,
+    isActive: false,
+    customTitle: 'My renamed chat',
+  };
+  assert.strictEqual(getSessionDisplayTitle(withCustomTitle, 'fallback'), 'My renamed chat');
+
+  const withoutCustomTitle: SessionSummary = {
+    id: 'sess-2',
+    path: '/p2.jsonl',
+    firstMessage: 'Original first message',
+    messageCount: 3,
+    isActive: false,
+  };
+  assert.strictEqual(getSessionDisplayTitle(withoutCustomTitle, 'fallback'), 'Original first message');
+
+  const blankCustomTitle: SessionSummary = {
+    id: 'sess-3',
+    path: '/p3.jsonl',
+    firstMessage: 'Original first message',
+    messageCount: 3,
+    isActive: false,
+    customTitle: '   ',
+  };
+  assert.strictEqual(getSessionDisplayTitle(blankCustomTitle, 'fallback'), 'Original first message');
+
+  const noMessagesEither: SessionSummary = {
+    id: 'sess-4',
+    path: '/p4.jsonl',
+    firstMessage: '',
+    messageCount: 0,
+    isActive: false,
+  };
+  assert.strictEqual(getSessionDisplayTitle(noMessagesEither, 'fallback'), 'fallback');
+});
+
+test('normalizeSessionName: trims whitespace and collapses blank input to empty string', () => {
+  assert.strictEqual(normalizeSessionName('  My Session  '), 'My Session');
+  assert.strictEqual(normalizeSessionName('   '), '');
+  assert.strictEqual(normalizeSessionName(''), '');
+  assert.strictEqual(normalizeSessionName('No leading or trailing'), 'No leading or trailing');
 });
 
 test('Bridge: deleteSessionPi invokes delete_session command with payload', async () => {
@@ -121,6 +180,35 @@ test('Bridge: deleteSessionPi invokes delete_session command with payload', asyn
   assert.deepStrictEqual(calls[0].args, { payload: { sessionPath: '/path/to/del.jsonl' } });
   assert.strictEqual(res.success, true);
   assert.strictEqual(res.wasActive, false);
+});
+
+test('Bridge: renameSessionPi invokes rename_session command with payload and returns updated summary', async () => {
+  const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+  const mockInvoke = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+    calls.push({ cmd, args });
+    return {
+      id: 'sess-1',
+      path: '/path/to/session.jsonl',
+      firstMessage: 'Hello',
+      messageCount: 2,
+      isActive: false,
+      customTitle: 'My renamed chat',
+    } as T;
+  };
+
+  const { renameSessionPi } = await import('@infra/bridge');
+  const res = await renameSessionPi('/path/to/session.jsonl', 'My renamed chat', mockInvoke);
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].cmd, 'rename_session');
+  assert.deepStrictEqual(calls[0].args, {
+    payload: { sessionPath: '/path/to/session.jsonl', name: 'My renamed chat' },
+  });
+  assert.strictEqual(res.customTitle, 'My renamed chat');
+});
+
+test('Bridge: renameSessionPi throws outside Tauri without an injected invokeFn', async () => {
+  const { renameSessionPi } = await import('@infra/bridge');
+  await assert.rejects(() => renameSessionPi('/path/to/session.jsonl', 'New name'));
 });
 
 test('SessionSidebar: empty sessions with 0 messages are not eligible for deletion', () => {

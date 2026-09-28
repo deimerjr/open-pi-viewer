@@ -16,14 +16,12 @@ import {
   formatLocalizedStatusDetail,
   type TranslationKey,
 } from '@shared/i18n';
-import {
-  ThinkingCard,
-  ToolCard,
-} from '@features/chat/ActivityBlocks';
+import { ProcessGroupCard } from '@features/chat/ProcessGroupCard';
 import {
   MarkdownContent,
   shouldRenderAsMarkdown,
 } from '@features/chat/MarkdownContent';
+import { groupMessageBlocks, mergeConsecutiveAssistantMessages } from '@core/process-grouping';
 import { PromptControls } from '@features/chat/PromptControls';
 import {
   isMessageEmpty,
@@ -1059,9 +1057,9 @@ export const App: React.FC = () => {
             </div>
           ) : (
             <ul className="message-list">
-              {state.messages
-                .filter((msg) => !isMessageEmpty(msg))
-                .map((msg) => (
+              {mergeConsecutiveAssistantMessages(
+                state.messages.filter((msg) => !isMessageEmpty(msg))
+              ).map((msg) => (
                 <li
                   key={msg.id}
                   className={`message-item message-${msg.role}${msg.isCancelled ? ' message-cancelled' : ''}`}
@@ -1089,29 +1087,17 @@ export const App: React.FC = () => {
                   <div className={`message-content message-content-${msg.role}`}>
                     {msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0 ? (
                       <div className="activity-blocks">
-                        {msg.blocks.map((block, bIndex) => {
-                          if (block.type === 'thinking') {
+                        {groupMessageBlocks(msg.blocks).map((item, iIndex) => {
+                          if (item.type === 'process_group') {
                             return (
-                              <ThinkingCard
-                                key={`thinking-${bIndex}`}
-                                block={block}
-                                t={t}
-                              />
+                              <ProcessGroupCard key={item.id} group={item} t={t} />
                             );
                           }
-                          if (block.type === 'tool_call') {
-                            return (
-                              <ToolCard
-                                key={block.id || `tool-${bIndex}`}
-                                block={block}
-                                t={t}
-                              />
-                            );
-                          }
+                          const block = item.block;
                           if (block.type === 'text') {
                             return (
                               <MarkdownContent
-                                key={`text-${bIndex}`}
+                                key={`text-${iIndex}`}
                                 content={block.text}
                                 t={t}
                                 onInsertCode={insertCodeIntoPrompt}

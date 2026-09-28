@@ -58,6 +58,7 @@ import {
   updateWindowTitle,
 } from '@infra/icon-status';
 import type { ConnectConfig, ConnectResult } from '@core/types/connection';
+import { buildCommandCatalog, filterVisibleCommands, type ReloadRequest } from '@core/commands';
 import { useWorkspaceView } from '@features/workspace/hooks/useWorkspaceView';
 import { normalizeWorkspaceKey } from '@features/workspace/workspace-cache';
 import { useChatScroll } from '@features/chat/hooks/useChatScroll';
@@ -80,6 +81,8 @@ import {
 } from '@features/projects/projects';
 import { useSessions } from '@features/sessions/hooks/useSessions';
 import { usePromptState } from '@features/chat/hooks/usePromptState';
+import { useCommandPalette } from '@features/chat/hooks/useCommandPalette';
+import { CommandPalettePopover } from '@features/chat/components/CommandPalettePopover';
 import { useModels } from '@features/providers/hooks/useModels';
 import { useMcpServers } from '@features/mcp/hooks/useMcpServers';
 import { usePiResources } from '@features/extensions/hooks/usePiResources';
@@ -126,38 +129,6 @@ export const App: React.FC = () => {
     sessionId: state.sessionId,
     showSettings,
   });
-
-  // Prompt cluster: draft text, send/abort, and the Enter-to-send binding.
-  // `pinAndJumpToBottom` is T5a's scroll primitive, injected here rather
-  // than imported by the hook itself.
-  const {
-    prompt,
-    setPrompt,
-    attachedFiles,
-    addAttachedFiles,
-    removeAttachedFile,
-    handleSend,
-    handleAbort,
-    handleKeyDown,
-  } = usePromptState({
-    isReadyToSend,
-    isBusy,
-    canQueue,
-    pendingPromptId: state.pendingPromptId,
-    dispatch,
-    pinAndJumpToBottom,
-    messages: state.messages,
-  });
-
-  // Pure wrapper handing MarkdownContent's per-code-card "Insert into prompt" button a way
-  // to append a fenced snippet to the prompt draft (Issue #7); the actual wrap/append logic
-  // is core-pure (`buildInsertCodeDraft`).
-  const insertCodeIntoPrompt = useCallback(
-    (code: string, language?: string) => {
-      setPrompt((prev) => buildInsertCodeDraft(prev, code, language));
-    },
-    [setPrompt]
-  );
 
   // Connection cluster: persisted ConnectConfig, the connection-load storage warning, and
   // the StartupManager instance (attempt lifecycle, coalescing, retry). The onConnect*
@@ -289,8 +260,25 @@ export const App: React.FC = () => {
     handleThemeChange,
     handleLanguageChange,
     setNotifications,
+    setCustomCommands,
+    setHiddenCommandIds,
     t,
   } = usePreferences();
+
+  // Slash command catalog (Issue #9 T7): built-ins first (they keep precedence), then the
+  // user's custom commands registered in Settings. Shared by the palette and the dispatcher.
+  const customCommands = preferences.customCommands;
+  const commandCatalog = useMemo(
+    () => buildCommandCatalog(customCommands ?? []),
+    [customCommands]
+  );
+  // Commands the user hid in Settings (Issue #9 T8) are left out of the palette and "/help"
+  // only; dispatch keeps the full catalog so typing a hidden command still works.
+  const hiddenCommandIds = preferences.hiddenCommandIds;
+  const visibleCommandCatalog = useMemo(
+    () => filterVisibleCommands(commandCatalog, hiddenCommandIds ?? []),
+    [commandCatalog, hiddenCommandIds]
+  );
 
   // Projects cluster: registry state and handlers. Real decision logic (already-active/
   // isBusy no-op guard, and whether removing the active project should switch the working
@@ -410,11 +398,17 @@ export const App: React.FC = () => {
     },
   });
 
-  // Explicit retry without replaying prompts
-  const handleRetry = () => {
-    if (isConnecting || state.isResetting) return;
+  // Explicit retry without replaying prompts. Reports whether a new attempt was started
+  // (or one was already running) and, when started, the attempt's real outcome - used by
+  // the "/reload" slash command (Issue #9 T6) to tell the user whether it worked.
+  const requestRetry = (): ReloadRequest => {
+    if (isConnecting || state.isResetting) return { status: 'busy' };
     dispatch({ type: 'CLEAR_ERROR' });
-    void retryConnection(config);
+    return { status: 'started', result: retryConnection(config) };
+  };
+
+  const handleRetry = () => {
+    requestRetry();
   };
 
   // Sessions-list cluster: loadSessions, the load-on-connect and busy->idle reload
@@ -442,6 +436,55 @@ export const App: React.FC = () => {
       scrollToBottomNextFrame,
       startConnection,
     });
+
+  // Prompt cluster: draft text, send/abort, and the Enter-to-send binding. Declared here
+  // (rather than near useChatScroll, where it originally lived) because the Issue #9 slash
+  // command dispatcher it now owns needs onReload (handleRetry) and onNewConversation
+  // (useSessions.handleNewConversation), both declared just above. `pinAndJumpToBottom` is
+  // T5a's scroll primitive, injected here rather than imported by the hook itself.
+  const {
+    prompt,
+    setPrompt,
+    attachedFiles,
+    addAttachedFiles,
+    removeAttachedFile,
+    handleSend,
+    handleAbort,
+    handleKeyDown,
+  } = usePromptState({
+    isReadyToSend,
+    isBusy,
+    canQueue,
+    pendingPromptId: state.pendingPromptId,
+    dispatch,
+    pinAndJumpToBottom,
+    messages: state.messages,
+    language: preferences.language,
+    onNewConversation: handleNewConversation,
+    onReload: requestRetry,
+    commands: commandCatalog,
+    helpCommands: visibleCommandCatalog,
+  });
+
+  // Pure wrapper handing MarkdownContent's per-code-card "Insert into prompt" button a way
+  // to append a fenced snippet to the prompt draft (Issue #7); the actual wrap/append logic
+  // is core-pure (`buildInsertCodeDraft`).
+  const insertCodeIntoPrompt = useCallback(
+    (code: string, language?: string) => {
+      setPrompt((prev) => buildInsertCodeDraft(prev, code, language));
+    },
+    [setPrompt]
+  );
+
+  // Slash command palette (Issue #9): open/filter/navigation state derived from the live
+  // prompt draft. Purely a typing aid at this point — selecting a command autocompletes
+  // the draft to "/<name> "; whether that command then runs client-side or is forwarded to
+  // Pi as-is is decided by the dispatcher wired into handleSend.
+  const commandPalette = useCommandPalette({
+    prompt,
+    setPrompt,
+    commands: visibleCommandCatalog,
+  });
 
   // Dynamic application status and window title / favicon updater
   const appStatus: AppStatusState = useMemo(() => {
@@ -810,6 +853,8 @@ export const App: React.FC = () => {
               onThemeChange={handleThemeChange}
               onLanguageChange={handleLanguageChange}
               onNotificationsChange={setNotifications}
+              onCustomCommandsChange={setCustomCommands}
+              onHiddenCommandIdsChange={setHiddenCommandIds}
               settingsError={settingsError}
               settingsStorageNotice={settingsStorageNotice}
               isBusy={isBusy}
@@ -1235,7 +1280,14 @@ export const App: React.FC = () => {
               className={`prompt-textarea ${isHighContext ? 'context-pulse-red' : ''}`}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={handleKeyDown}
+              onKeyDown={(e) => {
+                if (commandPalette.handleKeyDown(e)) return;
+                handleKeyDown(e);
+              }}
+              role="combobox"
+              aria-expanded={commandPalette.isOpen}
+              aria-controls={commandPalette.isOpen ? 'command-palette-listbox' : undefined}
+              aria-autocomplete="list"
               placeholder={
                 isConnecting
                   ? t('prompt.placeholder_connecting')
@@ -1256,6 +1308,17 @@ export const App: React.FC = () => {
               aria-describedby="prompt-status-hint"
               rows={3}
             />
+
+            {commandPalette.isOpen && (
+              <CommandPalettePopover
+                commands={commandPalette.filteredCommands}
+                selectedIndex={commandPalette.selectedIndex}
+                onSelect={commandPalette.select}
+                onHoverIndex={commandPalette.setSelectedIndex}
+                language={preferences.language}
+                t={t}
+              />
+            )}
 
             <PromptControls
               modelInfo={state.modelInfo}

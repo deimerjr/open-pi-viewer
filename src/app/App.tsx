@@ -28,6 +28,7 @@ import {
   type RenderItem,
 } from '@core/process-grouping';
 import { InteractiveQuestionCard } from '@features/chat/components/InteractiveQuestionCard';
+import { UserMessageContent } from '@features/chat/components/UserMessageContent';
 import { PromptControls } from '@features/chat/PromptControls';
 import {
   isMessageEmpty,
@@ -499,6 +500,32 @@ export const App: React.FC = () => {
     },
     [activeDialog, handleDialogSelect, setPrompt]
   );
+
+  const handleOpenImageInNewTab = useCallback((e: React.MouseEvent, src: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!src) return;
+    if (src.startsWith('data:')) {
+      try {
+        const parts = src.split(',');
+        const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/png';
+        const bstr = atob(parts[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        const blob = new Blob([u8arr], { type: mime });
+        const url = URL.createObjectURL(blob);
+        window.open(url, '_blank');
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } catch {
+        window.open(src, '_blank');
+      }
+    } else {
+      window.open(src, '_blank');
+    }
+  }, []);
 
   // Slash command palette (Issue #9): open/filter/navigation state derived from the live
   // prompt draft. Purely a typing aid at this point — selecting a command autocompletes
@@ -1235,7 +1262,24 @@ export const App: React.FC = () => {
                     ) : shouldRenderAsMarkdown(msg.role) ? (
                       <MarkdownContent content={msg.content} t={t} onInsertCode={insertCodeIntoPrompt} />
                     ) : (
-                      <div className="message-literal">{msg.content}</div>
+                      <UserMessageContent content={msg.content} />
+                    )}
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="message-images-grid">
+                        {msg.images.map((imgSrc: string, imgIdx: number) => (
+                          <a
+                            key={`msg-img-${imgIdx}`}
+                            href={imgSrc}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="message-image-wrap"
+                            onClick={(e) => handleOpenImageInNewTab(e, imgSrc)}
+                            title={preferences.language === 'es' ? 'Abrir imagen en una pestaña nueva' : 'Open image in new tab'}
+                          >
+                            <img src={imgSrc} alt={`Attachment ${imgIdx + 1}`} className="message-image-thumb" />
+                          </a>
+                        ))}
+                      </div>
                     )}
                     {msg.isStreaming && (
                       <span

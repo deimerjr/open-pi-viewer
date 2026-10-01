@@ -259,6 +259,9 @@ export const App: React.FC = () => {
     dismissPreferencesWarning,
     handleThemeChange,
     handleLanguageChange,
+    handleWorkAnimationChange,
+    handleCustomThemeColorsChange,
+    handleCustomBackgroundChange,
     setNotifications,
     setCustomCommands,
     setHiddenCommandIds,
@@ -735,6 +738,26 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-container">
+      {preferences.customBackground?.image?.enabled && preferences.customBackground?.image?.url && (
+        <div
+          className="app-custom-background-layer"
+          style={{
+            backgroundImage: `url("${preferences.customBackground.image.url}")`,
+            backgroundSize: preferences.customBackground.image.fit || 'cover',
+            backgroundPosition: preferences.customBackground.image.position || 'center',
+            backgroundRepeat:
+              preferences.customBackground.image.repeat ||
+              preferences.customBackground.image.fit === 'repeat'
+                ? 'repeat'
+                : 'no-repeat',
+            opacity: preferences.customBackground.image.opacity ?? 0.4,
+            filter: preferences.customBackground.image.blur
+              ? `blur(${preferences.customBackground.image.blur}px)`
+              : undefined,
+          }}
+          aria-hidden="true"
+        />
+      )}
       <header className="app-header" role="banner">
         <div className="header-brand">
           <button
@@ -852,6 +875,9 @@ export const App: React.FC = () => {
               preferences={preferences}
               onThemeChange={handleThemeChange}
               onLanguageChange={handleLanguageChange}
+              onWorkAnimationChange={handleWorkAnimationChange}
+              onCustomThemeColorsChange={handleCustomThemeColorsChange}
+              onCustomBackgroundChange={handleCustomBackgroundChange}
               onNotificationsChange={setNotifications}
               onCustomCommandsChange={setCustomCommands}
               onHiddenCommandIdsChange={setHiddenCommandIds}

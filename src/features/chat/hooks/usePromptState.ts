@@ -171,7 +171,7 @@ export function usePromptState({
    * unrecognized commands — those fall through to the ordinary send path below and reach
    * Pi unchanged, exactly as typed.
    */
-  const executeClientCommand = (commandId: string) => {
+  const executeClientCommand = (commandId: string, args = '') => {
     switch (commandId) {
       case 'clear': {
         dispatch({ type: 'CLEAR_MESSAGES' });

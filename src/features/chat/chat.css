@@ -191,7 +191,7 @@
 
 .btn-load-older-messages:hover {
   background-color: var(--bg-hover);
-  color: var(--accent-hover);
+  color: var(--accent-primary-hover, var(--accent-primary));
 }
 
 .btn-load-all-messages {
@@ -957,7 +957,7 @@
   transform: scale(0.1);
   border-radius: 50%;
   animation: animateDot 2s linear infinite;
-  animation-delay: calc(0.1s * var(--i));
+  animation-delay: calc(0.1s * var(--i, 0));
 }
 
 .prompt-degraciao-loader.is-mode-single .loader .dot {
@@ -976,7 +976,7 @@
 }
 
 .prompt-degraciao-loader .loader:last-child .dot {
-  animation-delay: calc(-0.1s * var(--i));
+  animation-delay: calc(-0.1s * var(--i, 0));
 }
 
 @keyframes animateDot {

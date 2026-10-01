@@ -21,7 +21,13 @@ import {
   MarkdownContent,
   shouldRenderAsMarkdown,
 } from '@features/chat/MarkdownContent';
-import { groupMessageBlocks, mergeConsecutiveAssistantMessages } from '@core/process-grouping';
+import {
+  groupMessageBlocks,
+  mergeConsecutiveAssistantMessages,
+  isInteractiveUserTool,
+  type RenderItem,
+} from '@core/process-grouping';
+import { InteractiveQuestionCard } from '@features/chat/components/InteractiveQuestionCard';
 import { PromptControls } from '@features/chat/PromptControls';
 import {
   isMessageEmpty,
@@ -477,6 +483,21 @@ export const App: React.FC = () => {
       setPrompt((prev) => buildInsertCodeDraft(prev, code, language));
     },
     [setPrompt]
+  );
+
+  const handleSelectInteractiveOption = useCallback(
+    (label: string) => {
+      if (activeDialog) {
+        handleDialogSelect(activeDialog.itemKey, label);
+      } else {
+        setPrompt(label);
+        const textarea = document.querySelector<HTMLTextAreaElement>('#prompt-input');
+        if (textarea) {
+          textarea.focus();
+        }
+      }
+    },
+    [activeDialog, handleDialogSelect, setPrompt]
   );
 
   // Slash command palette (Issue #9): open/filter/navigation state derived from the live
@@ -1129,8 +1150,8 @@ export const App: React.FC = () => {
           ) : (
             <ul className="message-list">
               {mergeConsecutiveAssistantMessages(
-                state.messages.filter((msg) => !isMessageEmpty(msg))
-              ).map((msg) => (
+                state.messages.filter((msg: any) => !isMessageEmpty(msg))
+              ).map((msg: any) => (
                 <li
                   key={msg.id}
                   className={`message-item message-${msg.role}${msg.isCancelled ? ' message-cancelled' : ''}`}
@@ -1158,7 +1179,7 @@ export const App: React.FC = () => {
                   <div className={`message-content message-content-${msg.role}`}>
                     {msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0 ? (
                       <div className="activity-blocks">
-                        {groupMessageBlocks(msg.blocks).map((item, iIndex) => {
+                        {groupMessageBlocks(msg.blocks).map((item: RenderItem, iIndex: number) => {
                           if (item.type === 'process_group') {
                             return (
                               <ProcessGroupCard key={item.id} group={item} t={t} />
@@ -1172,6 +1193,16 @@ export const App: React.FC = () => {
                                 content={block.text}
                                 t={t}
                                 onInsertCode={insertCodeIntoPrompt}
+                              />
+                            );
+                          }
+                          if (block.type === 'tool_call' && isInteractiveUserTool(block.name)) {
+                            return (
+                              <InteractiveQuestionCard
+                                key={block.id || `interactive-${iIndex}`}
+                                block={block}
+                                onSelectOption={handleSelectInteractiveOption}
+                                t={t}
                               />
                             );
                           }

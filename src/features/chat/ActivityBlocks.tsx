@@ -37,6 +37,13 @@ export function formatToolPrimaryArg(name: string, args: unknown): string | null
   if (name === 'read' && typeof obj.path === 'string') {
     return obj.path;
   }
+  // Subagent execution: extract agent name or task label
+  if (name.startsWith('subagent') || name === 'agent') {
+    if (typeof obj.agent === 'string') {
+      const taskLabel = typeof obj.label === 'string' ? obj.label : typeof obj.task === 'string' ? obj.task.slice(0, 40) : '';
+      return taskLabel ? `${obj.agent} · ${taskLabel}` : obj.agent;
+    }
+  }
   if (name === 'grep') {
     if (typeof obj.pattern === 'string' && typeof obj.path === 'string') {
       return `"${obj.pattern}" in ${obj.path}`;

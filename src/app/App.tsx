@@ -474,6 +474,7 @@ export const App: React.FC = () => {
     onReload: requestRetry,
     commands: commandCatalog,
     helpCommands: visibleCommandCatalog,
+    onZenToggle: () => setIsZenMode((prev) => !prev),
   });
 
   // Pure wrapper handing MarkdownContent's per-code-card "Insert into prompt" button a way

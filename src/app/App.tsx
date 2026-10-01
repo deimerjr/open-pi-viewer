@@ -740,6 +740,19 @@ export const App: React.FC = () => {
     setShowSettings(false);
   };
 
+  const [isZenMode, setIsZenMode] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isZenMode) return;
+    const handleZenEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !showSettings && !profilesHook.isModalOpen) {
+        setIsZenMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleZenEsc);
+    return () => window.removeEventListener('keydown', handleZenEsc);
+  }, [isZenMode, showSettings, profilesHook.isModalOpen]);
+
 
   const activeProject = projectsRegistry.projects.find(
     (p) => p.id === projectsRegistry.activeProjectId
@@ -758,7 +771,7 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className="app-container">
+    <div className={`app-container ${isZenMode ? 'zen-mode' : ''}`}>
       {preferences.customBackground?.image?.enabled && preferences.customBackground?.image?.url && (
         <div
           className="app-custom-background-layer"
@@ -778,6 +791,16 @@ export const App: React.FC = () => {
           }}
           aria-hidden="true"
         />
+      )}
+      {isZenMode && (
+        <button
+          type="button"
+          className="btn-exit-zen"
+          onClick={() => setIsZenMode(false)}
+          title={preferences.language === 'es' ? 'Salir de Modo Zen (Esc)' : 'Exit Zen Mode (Esc)'}
+        >
+          ✕ {preferences.language === 'es' ? 'Salir de Modo Zen' : 'Exit Zen Mode'}
+        </button>
       )}
       <header className="app-header" role="banner">
         <div className="header-brand">

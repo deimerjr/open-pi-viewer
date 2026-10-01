@@ -44,6 +44,8 @@ pub struct SendPromptPayload {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<PromptImageAttachment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "streamingBehavior")]
+    pub streaming_behavior: Option<String>,
 }
 
 
@@ -463,6 +465,9 @@ pub async fn send_prompt(
         if !imgs.is_empty() {
             prompt_cmd["images"] = serde_json::to_value(imgs).unwrap_or(serde_json::Value::Array(vec![]));
         }
+    }
+    if let Some(ref sb) = payload.streaming_behavior {
+        prompt_cmd["streamingBehavior"] = serde_json::Value::String(sb.clone());
     }
 
     if let Err(_) = stdin_tx.send(prompt_cmd.to_string()).await {
@@ -1134,6 +1139,7 @@ mod tests {
             id: "prompt-123e4567-e89b-12d3-a456-426614174000".to_string(),
             message: "Hello Pi".to_string(),
             images: None,
+            streaming_behavior: None,
         };
         let serialized = serde_json::to_string(&payload).unwrap();
         assert!(serialized.contains("\"id\":\"prompt-123e4567-e89b-12d3-a456-426614174000\""));
@@ -1153,6 +1159,7 @@ mod tests {
                 data: "base64data".to_string(),
                 mime_type: "image/png".to_string(),
             }]),
+            streaming_behavior: None,
         };
         let serialized_img = serde_json::to_string(&payload_with_images).unwrap();
         assert!(serialized_img.contains("\"type\":\"image\""));

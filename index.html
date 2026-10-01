@@ -4,6 +4,248 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Pi Viewer</title>
+    <script>
+      // Web IPC Bridge & Auto-Configuration for Browser Preview / LAN
+      (function() {
+        // Polyfill crypto.randomUUID for non-secure HTTP LAN contexts (e.g. http://192.168.x.x:5174)
+        if (typeof window !== 'undefined' && window.crypto && typeof window.crypto.randomUUID !== 'function') {
+          window.crypto.randomUUID = function() {
+            if (typeof window.crypto.getRandomValues === 'function') {
+              const bytes = new Uint8Array(16);
+              window.crypto.getRandomValues(bytes);
+              bytes[6] = (bytes[6] & 0x0f) | 0x40;
+              bytes[8] = (bytes[8] & 0x3f) | 0x80;
+              const hex = Array.from(bytes, function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+              return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+            }
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+              const r = (Math.random() * 16) | 0;
+              const v = c === 'x' ? r : (r & 0x3) | 0x8;
+              return v.toString(16);
+            });
+          };
+        }
+
+        // Pre-seed configuration for CLI-pi and active project if unconfigured
+        try {
+          const configKey = 'pi_viewer_connect_config';
+          const existingConfig = localStorage.getItem(configKey);
+          if (!existingConfig || existingConfig === '{}' || !JSON.parse(existingConfig).piEntrypoint) {
+            localStorage.setItem(configKey, JSON.stringify({
+              nodePath: '/home/hermes/.local/share/node-v22.23.2-linux-x64/bin/node',
+              piEntrypoint: '/home/hermes/.local/share/node-v22.23.2-linux-x64/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js',
+              workingDirectory: '/home/hermes/Desarrollos/PI-Viewer',
+              fileTreeRefreshInterval: 15
+            }));
+          }
+
+          // Clean up any stale legacy pre-seeded sessions to allow dynamic detection of latest session
+          try {
+            const sessionsStorageKey = 'pi_viewer_sessions';
+            const rawSessions = localStorage.getItem(sessionsStorageKey);
+            if (rawSessions) {
+              try {
+                const sessionsObj = JSON.parse(rawSessions);
+                if (sessionsObj['/home/hermes/Desarrollos/PI-Viewer']?.sessionId === '01a0d4d9-1568-7684-9577-9d8509dda01e') {
+                  delete sessionsObj['/home/hermes/Desarrollos/PI-Viewer'];
+                  localStorage.setItem(sessionsStorageKey, JSON.stringify(sessionsObj));
+                }
+              } catch (e) {}
+            }
+          } catch(e) {}
+
+          // Initial list of projects with sessions in Pi CLI
+          const defaultProjects = [
+            {
+              id: 'proj-prueba',
+              path: 'Z:\\Prueba',
+              customName: 'Prueba (Z:\\)'
+            },
+            {
+              id: 'proj-pi-viewer',
+              path: '/home/hermes/Desarrollos/PI-Viewer',
+              customName: 'PI-Viewer'
+            },
+            {
+              id: 'proj-cpamc',
+              path: '/home/hermes/Desarrollos/CPAMC',
+              customName: 'CPAMC'
+            },
+            {
+              id: 'proj-clodeserver',
+              path: '/home/hermes/Desarrollos/Automatizacion/ClodeServer',
+              customName: 'ClodeServer'
+            },
+            {
+              id: 'proj-plugin-voz',
+              path: '/home/hermes/Desarrollos/Automatizacion/Gentle/Plugin/Voz',
+              customName: 'Plugin Voz'
+            },
+            {
+              id: 'proj-gentle',
+              path: '/home/hermes/Desarrollos/Automatizacion/Gentle',
+              customName: 'Gentle'
+            },
+            {
+              id: 'proj-emgrancloud',
+              path: '/home/hermes/Desarrollos/EmgranCloud',
+              customName: 'EmgranCloud'
+            },
+            {
+              id: 'proj-win-clodeserver',
+              path: '/home/hermes/win-clodeserver',
+              customName: 'win-clodeserver'
+            },
+            {
+              id: 'proj-gentle-ai',
+              path: '/home/hermes/.gentle-ai',
+              customName: '.gentle-ai'
+            },
+            {
+              id: 'proj-home-hermes',
+              path: '/home/hermes',
+              customName: 'Hermes (Home)'
+            }
+          ];
+
+          const projectsKey = 'pi_viewer_projects';
+          let parsedProjects = { projects: [], activeProjectId: 'proj-pi-viewer' };
+          try {
+            const raw = localStorage.getItem(projectsKey);
+            if (raw) parsedProjects = JSON.parse(raw);
+          } catch {}
+
+          if (!Array.isArray(parsedProjects.projects)) parsedProjects.projects = [];
+
+          const existingPaths = new Set(parsedProjects.projects.map(function(p) { return p.path; }));
+          let changed = false;
+
+          for (let i = 0; i < defaultProjects.length; i++) {
+            const proj = defaultProjects[i];
+            const hasPath = existingPaths.has(proj.path) ||
+              (proj.path === 'Z:\\Prueba' && (existingPaths.has('Z:/Prueba') || existingPaths.has('/home/hermes/Desarrollos/Prueba')));
+            if (!hasPath) {
+              parsedProjects.projects.push({
+                id: proj.id,
+                path: proj.path,
+                customName: proj.customName,
+                createdAt: new Date().toISOString(),
+                lastOpenedAt: new Date().toISOString()
+              });
+              existingPaths.add(proj.path);
+              changed = true;
+            }
+          }
+
+          if (!parsedProjects.activeProjectId && parsedProjects.projects.length > 0) {
+            parsedProjects.activeProjectId = parsedProjects.projects[0].id;
+            changed = true;
+          }
+
+          if (changed || !localStorage.getItem(projectsKey)) {
+            localStorage.setItem(projectsKey, JSON.stringify(parsedProjects));
+          }
+        } catch (e) {
+          console.warn('Could not seed local storage:', e);
+        }
+
+        // If not in native desktop Tauri, install Web IPC bridge shim
+        if (!window.__TAURI_INTERNALS__) {
+          let nextCallbackId = 1;
+          const callbacks = new Map();
+          const eventListeners = new Map(); // eventName -> Set<handlerId>
+
+          // Connect SSE stream for real-time tokens, thinking blocks, and tool executions
+          try {
+            const sse = new EventSource('/api/events');
+            sse.onmessage = function(e) {
+              try {
+                const msg = JSON.parse(e.data);
+                if (!msg || !msg.event) return;
+                const set = eventListeners.get(msg.event);
+                if (set && set.size > 0) {
+                  set.forEach(function(handlerId) {
+                    const cb = callbacks.get(handlerId);
+                    if (cb) {
+                      cb({ event: msg.event, id: handlerId, payload: msg.payload });
+                    }
+                  });
+                }
+              } catch (err) {}
+            };
+          } catch (e) {
+            console.warn('[SSE] EventSource failed:', e);
+          }
+
+          window.isTauri = true;
+          window.__TAURI_INTERNALS__ = {
+            callbacks: callbacks,
+            transformCallback: function(callback, once) {
+              const id = nextCallbackId++;
+              callbacks.set(id, function(arg) {
+                callback(arg);
+                if (once) callbacks.delete(id);
+              });
+              return id;
+            },
+            unregisterCallback: function(id) {
+              callbacks.delete(id);
+            },
+            invoke: async function(cmd, args) {
+              if (cmd === 'open_external_url') {
+                if (args?.url) {
+                  window.open(args.url, '_blank');
+                }
+                return true;
+              }
+              if (cmd === 'plugin:event|listen') {
+                const ev = args?.event;
+                const handler = args?.handler;
+                if (ev && handler) {
+                  if (!eventListeners.has(ev)) {
+                    eventListeners.set(ev, new Set());
+                  }
+                  eventListeners.get(ev).add(handler);
+                }
+                return handler;
+              }
+              if (cmd === 'plugin:event|unlisten') {
+                const ev = args?.event;
+                const eventId = args?.eventId;
+                if (ev && eventId && eventListeners.has(ev)) {
+                  eventListeners.get(ev).delete(eventId);
+                }
+                return null;
+              }
+              if (cmd === 'pick_directory') {
+                return null;
+              }
+              const res = await fetch('/api/ipc', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cmd, args: args || {} })
+              });
+              if (!res.ok) {
+                throw new Error('IPC HTTP error ' + res.status);
+              }
+              const data = await res.json();
+              if (data.error) {
+                throw new Error(data.error);
+              }
+              return data.result;
+            }
+          };
+
+          window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+            unregisterListener: function(ev, id) {
+              if (ev && id && eventListeners.has(ev)) {
+                eventListeners.get(ev).delete(id);
+              }
+            }
+          };
+        }
+      })();
+    </script>
     <style>
       html, body {
         background-color: #0d1117;

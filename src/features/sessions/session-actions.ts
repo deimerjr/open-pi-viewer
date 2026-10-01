@@ -20,10 +20,10 @@ export type SelectSessionDecision =
 export function decideSelectSession(
   session: SessionSummary,
   sessionState: { isSwitchingSession: boolean; sessionId: string | null; sessionFile: string | null },
-  isBusy: boolean,
+  _isBusy: boolean,
   showSettings: boolean
 ): SelectSessionDecision {
-  if (sessionState.isSwitchingSession || isBusy) {
+  if (sessionState.isSwitchingSession) {
     return { action: 'blocked' };
   }
 

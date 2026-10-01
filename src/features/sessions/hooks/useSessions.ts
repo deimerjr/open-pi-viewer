@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { deleteSessionPi, listSessionsPi, newSessionPi, switchSessionPi } from '@infra/bridge';
-import { hydrateChatMessages, recordSessionSwitched, saveSessionRecord } from '@core/session';
+import { deleteSessionPi, getSessionStatsPi, listSessionsPi, newSessionPi, renameSessionPi, switchSessionPi } from '@infra/bridge';
+import { hydrateChatMessages, loadSessionTitles, recordSessionSwitched, saveSessionRecord, saveSessionTitle } from '@core/session';
 import type { ChatAction } from '@core/reducer';
 import type { ConnectConfig, ConnectionState } from '@core/types/connection';
 import type { SessionSummary } from '@core/types/sessions';
+import type { ChatMessage } from '@core/types/messages';
 import type { TranslationKey } from '@shared/i18n';
 import {
   canStartNewConversation,
@@ -45,6 +46,7 @@ export interface UseSessionsResult {
   loadSessions: (cwd?: string) => Promise<void>;
   handleSelectSession: (session: SessionSummary) => Promise<void>;
   handleDeleteSession: (session: SessionSummary) => Promise<void>;
+  handleRenameSession: (session: SessionSummary, newTitle: string) => Promise<void>;
   handleNewConversation: () => Promise<void>;
 }
 
@@ -56,6 +58,15 @@ export interface UseSessionsResult {
  * the pure, tested functions in session-actions.ts; this hook is thin glue between those,
  * the bridge calls, and cross-feature callbacks injected by App.tsx.
  */
+interface CachedSessionData {
+  sessionId: string;
+  sessionFile: string;
+  messages: ChatMessage[];
+  messageCount: number;
+}
+
+const clientSessionCache = new Map<string, CachedSessionData>();
+
 export function useSessions({
   activeProjectId,
   config,
@@ -87,10 +98,15 @@ export function useSessions({
       try {
         dispatch({ type: 'LOAD_SESSIONS_START', targetProjectId: targetPid });
         const list = await listSessionsPi(targetCwd);
+        const storedTitles = loadSessionTitles();
+        const mergedList = list.map((s) => ({
+          ...s,
+          customTitle: storedTitles[s.id] || s.customTitle,
+        }));
         dispatch({
           type: 'LOAD_SESSIONS_SUCCESS',
           targetProjectId: targetPid,
-          payload: { sessions: list },
+          payload: { sessions: mergedList },
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -141,6 +157,51 @@ export function useSessions({
 
     setShowSettings(false);
 
+    // Instant Fast-Path: If session messages are already in client memory, switch immediately in 0ms!
+    const cached = clientSessionCache.get(session.path);
+    if (cached) {
+      pinAndHide();
+      dispatch({
+        type: 'SWITCH_SESSION_SUCCESS',
+        payload: {
+          sessionId: cached.sessionId,
+          sessionFile: cached.sessionFile,
+          messages: cached.messages,
+        },
+      });
+
+      recordSessionSwitched(
+        config.workingDirectory,
+        cached.sessionId,
+        cached.sessionFile,
+        cached.messages.length > 0
+      );
+
+      // Revalidate in background with backend so any newly completed response renders immediately
+      void switchSessionPi(session.path).then((result) => {
+        if (!result.cancelled && result.sessionId && result.sessionFile && result.messages) {
+          const fresh = hydrateChatMessages(result.messages);
+          clientSessionCache.set(session.path, {
+            sessionId: result.sessionId,
+            sessionFile: result.sessionFile,
+            messages: fresh,
+            messageCount: result.messageCount,
+          });
+          if (fresh.length !== cached.messages.length) {
+            dispatch({
+              type: 'SWITCH_SESSION_SUCCESS',
+              payload: {
+                sessionId: result.sessionId,
+                sessionFile: result.sessionFile,
+                messages: fresh,
+              },
+            });
+          }
+        }
+      });
+      return;
+    }
+
     try {
       pinAndHide();
       dispatch({ type: 'SWITCH_SESSION_START', payload: { sessionPath: session.path } });
@@ -170,6 +231,14 @@ export function useSessions({
         },
       });
 
+      // Cache session in client memory for instant switching in future
+      clientSessionCache.set(session.path, {
+        sessionId: result.sessionId,
+        sessionFile: result.sessionFile,
+        messages: hydrated,
+        messageCount: result.messageCount,
+      });
+
       // Synchronize persistence record
       recordSessionSwitched(
         config.workingDirectory,
@@ -181,6 +250,18 @@ export function useSessions({
       // Refresh session list
       void loadSessions();
       requestFileTreeRefresh();
+
+      // Fetch and update session stats immediately for the switched session
+      try {
+        const stats = await getSessionStatsPi();
+        if (stats) {
+          dispatch({
+            type: 'SET_SESSION_STATS',
+            targetProjectId: activeProjectIdRef.current ?? undefined,
+            payload: { stats },
+          });
+        }
+      } catch {}
 
       scrollToBottomNextFrame();
     } catch (err: unknown) {
@@ -196,6 +277,7 @@ export function useSessions({
     if (isBusy || isSwitchingSession) return;
 
     try {
+      clientSessionCache.delete(session.path);
       const res = await deleteSessionPi(session.path);
       const outcome = decideDeleteOutcome(res);
 
@@ -235,6 +317,25 @@ export function useSessions({
         type: 'LOAD_SESSIONS_ERROR',
         payload: { error: `${t('sidebar.delete_failed')}: ${msg}` },
       });
+    }
+  };
+
+  const handleRenameSession = async (session: SessionSummary, newTitle: string) => {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+
+    saveSessionTitle(session.id, trimmed);
+
+    dispatch({
+      type: 'RENAME_SESSION',
+      targetProjectId: activeProjectIdRef.current ?? undefined,
+      payload: { sessionId: session.id, newTitle: trimmed },
+    });
+
+    try {
+      await renameSessionPi(session.path, trimmed);
+    } catch (err) {
+      console.warn('Failed to append custom title to session file:', err);
     }
   };
 
@@ -299,6 +400,7 @@ export function useSessions({
     loadSessions,
     handleSelectSession,
     handleDeleteSession,
+    handleRenameSession,
     handleNewConversation,
   };
 }

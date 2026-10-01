@@ -30,14 +30,15 @@ const otherSession: SessionSummary = {
   isActive: false,
 };
 
-test('decideSelectSession: blocked while switching or busy, regardless of which session was clicked', () => {
+test('decideSelectSession: blocked while switching, allows switching to another session while busy', () => {
   const sessionState = { isSwitchingSession: true, sessionId: null, sessionFile: null };
   assert.deepStrictEqual(decideSelectSession(otherSession, sessionState, false, false), {
     action: 'blocked',
   });
+  // When busy but not mid-switch, clicking another session proceeds to switch
   assert.deepStrictEqual(
     decideSelectSession(otherSession, { ...sessionState, isSwitchingSession: false }, true, false),
-    { action: 'blocked' }
+    { action: 'switch' }
   );
 });
 

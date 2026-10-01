@@ -4,7 +4,7 @@ import type { ProfileSummary } from '@core/types/profiles';
 import type { McpServerConfig } from '@core/types/mcp';
 import type { PiResourceEntry } from '@core/types/extensions';
 import type { TranslationKey } from '@shared/i18n';
-import type { EngramCloudStatus } from '@infra/bridge';
+import type { EngramCloudStatus, EngramObservation } from '@infra/bridge';
 import type { AttachedFile, FileAttachmentType } from './types';
 import {
   formatTokens,
@@ -75,6 +75,7 @@ export interface PromptControlsProps {
   onCheckCloudStatus?: () => Promise<EngramCloudStatus | null> | void;
   isEnrolling?: boolean;
   onEnrollProject?: () => Promise<boolean> | boolean;
+  engramObservations?: EngramObservation[];
   defaultCloudPopoverOpen?: boolean;
   defaultEnrollConfirmOpen?: boolean;
   attachedFiles?: AttachedFile[];
@@ -120,6 +121,7 @@ export const PromptControls: React.FC<PromptControlsProps> = ({
   onCheckCloudStatus,
   isEnrolling = false,
   onEnrollProject,
+  engramObservations,
   defaultCloudPopoverOpen = false,
   defaultEnrollConfirmOpen = false,
   attachedFiles: _attachedFiles,
@@ -490,7 +492,7 @@ export const PromptControls: React.FC<PromptControlsProps> = ({
   return (
     <div className="prompt-controls-bar" role="toolbar" aria-label={t('prompt_controls.toolbar_aria')}>
       {/* 0. Unified Action Button (Send / Cancel / Confirm) */}
-      {isBusy ? (
+      {isBusy && !canSend ? (
         <button
           type="button"
           className={`prompt-action-btn btn-cancel${isConfirmingCancel ? ' btn-confirming' : ''}`}
@@ -499,6 +501,25 @@ export const PromptControls: React.FC<PromptControlsProps> = ({
         >
           {isConfirmingCancel ? t('prompt.confirm_cancel') : t('action.stop')}
         </button>
+      ) : isBusy && canSend ? (
+        <div style={{ display: 'inline-flex', gap: '6px' }}>
+          <button
+            type="button"
+            className={`prompt-action-btn btn-cancel${isConfirmingCancel ? ' btn-confirming' : ''}`}
+            onClick={handleCancelClick}
+            title={isConfirmingCancel ? t('prompt.confirm_cancel_title') : t('prompt.stop_title')}
+          >
+            {isConfirmingCancel ? t('prompt.confirm_cancel') : t('action.stop')}
+          </button>
+          <button
+            type="submit"
+            className="prompt-action-btn btn-send"
+            title="Encolar instrucción en Pi (Enter)"
+            onClick={onSend ? (e) => { e.preventDefault(); onSend(); } : undefined}
+          >
+            {t('action.send')}
+          </button>
+        </div>
       ) : (
         <button
           type="submit"
@@ -1548,6 +1569,22 @@ export const PromptControls: React.FC<PromptControlsProps> = ({
                     </div>
                   )}
                 </div>
+
+                {engramObservations && engramObservations.length > 0 && (
+                  <div className="engram-observations-section">
+                    <div className="engram-obs-header">
+                      <span>Recuerdos en Memoria ({engramObservations.length}):</span>
+                    </div>
+                    <div className="engram-obs-list">
+                      {engramObservations.slice(0, 6).map((obs) => (
+                        <div key={obs.id} className="engram-obs-item" title={obs.content}>
+                          <span className="engram-obs-type">{obs.type}</span>
+                          <span className="engram-obs-title">{obs.title}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {showEnrollConfirm && (
                   <div className="engram-confirm-box">

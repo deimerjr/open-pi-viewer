@@ -170,6 +170,30 @@ export function parseMessageBlocks(content: unknown): MessageBlock[] {
 
   return blocks;
 }
+export function extractImagesFromContent(
+  content: string | MessageContentBlock[] | unknown
+): string[] {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  const images: string[] = [];
+  for (const block of content) {
+    if (block && typeof block === 'object') {
+      if (block.type === 'image') {
+        if (typeof block.data === 'string' && block.data.length > 0) {
+          const mime = block.mimeType || 'image/png';
+          images.push(block.data.startsWith('data:') ? block.data : `data:${mime};base64,${block.data}`);
+        } else if (typeof block.url === 'string' && block.url.length > 0) {
+          images.push(block.url);
+        }
+      }
+    }
+  }
+
+  return images;
+}
+
 export function extractTextFromContent(
   content: string | MessageContentBlock[] | unknown
 ): string {
@@ -537,11 +561,34 @@ export function isMessageEndEvent(event: Record<string, unknown>): event is {
 export const PROMPT_REQUEST_ID_PREFIX = 'prompt-';
 
 /**
+ * Generate a standard RFC 4122 UUID v4 string safely across both secure (HTTPS/localhost)
+ * and non-secure (HTTP LAN) browser contexts.
+ */
+function generateSafeUuidV4(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 10xx
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/**
  * Generate an authoritative client-generated opaque request ID for a prompt.
- * Uses crypto.randomUUID() prefixed with 'prompt-'.
+ * Uses crypto.randomUUID() (or RFC 4122 v4 fallback over HTTP LAN) prefixed with 'prompt-'.
  */
 export function generatePromptRequestId(): string {
-  return `${PROMPT_REQUEST_ID_PREFIX}${crypto.randomUUID()}`;
+  return `${PROMPT_REQUEST_ID_PREFIX}${generateSafeUuidV4()}`;
 }
 
 /**

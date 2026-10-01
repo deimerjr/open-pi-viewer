@@ -5,7 +5,7 @@
   "identifier": "com.pi-viewer.app",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:5174",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "security": {
       "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https: http:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:",
-      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:5173 ws://localhost:5173 https: http:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:"
+      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:5174 ws://localhost:5174 https: http:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:"
     },
     "windows": [
       {

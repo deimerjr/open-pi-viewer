@@ -66,6 +66,7 @@ export interface LinkOpenerControllerOptions {
   timeoutMs?: number;
   debounceMs?: number;
   openFn?: (url: string) => Promise<OpenUrlResult>;
+  requireModifier?: boolean;
 }
 
 /**
@@ -73,7 +74,7 @@ export interface LinkOpenerControllerOptions {
  * Supports complete independent testing in Node without React or DOM dependencies.
  *
  * Interaction contract:
- * - Plain click: prevent default, do NOT open or show failure
+ * - Plain click: opens external URL when requireModifier is false; does not open when requireModifier is true
  * - Ctrl+click or Meta+click: opens external URL
  * - Ctrl+Enter or Meta+Enter: keyboard activation opens
  * - Plain Enter or Space: does not open
@@ -90,6 +91,7 @@ export class LinkOpenerController {
   private readonly debounceMs: number;
   private readonly callbacks: LinkOpenerCallbacks;
   private readonly openFn: (url: string) => Promise<OpenUrlResult>;
+  private readonly requireModifier: boolean;
 
   constructor(
     callbacks: LinkOpenerCallbacks,
@@ -99,6 +101,7 @@ export class LinkOpenerController {
     this.timeoutMs = options?.timeoutMs ?? 2500;
     this.debounceMs = options?.debounceMs ?? 400;
     this.openFn = options?.openFn ?? openExternalUrl;
+    this.requireModifier = options?.requireModifier ?? true;
   }
 
   public getState(): OpenUrlStatus {
@@ -160,13 +163,14 @@ export class LinkOpenerController {
       return null;
     }
 
-    // Plain click must do NOTHING: no preventDefault, no stopPropagation, no state/time change
-    const hasModifier = Boolean(e.ctrlKey || e.metaKey);
-    if (!hasModifier) {
-      return null;
+    if (this.requireModifier) {
+      const hasModifier = Boolean(e.ctrlKey || e.metaKey);
+      if (!hasModifier) {
+        return null;
+      }
     }
 
-    // Modified eligible click: prevent default, stop propagation, then activate
+    // Modified or eligible click: prevent default, stop propagation, then activate
     e.preventDefault?.();
     e.stopPropagation?.();
     return this.activate(href);

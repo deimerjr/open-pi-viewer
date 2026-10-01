@@ -13,11 +13,14 @@ export interface SessionSidebarProps {
   onSelectSession: (session: SessionSummary) => void;
   onNewSession: () => void;
   onDeleteSession: (session: SessionSummary) => void;
+  onRenameSession?: (session: SessionSummary, newTitle: string) => void;
   onClose: () => void;
   locale: SupportedLocale;
   filesPanel: React.ReactNode;
   filesChangesCount?: number;
   projectName?: string;
+  activeTab?: 'sessions' | 'files';
+  onTabChange?: (tab: 'sessions' | 'files') => void;
 }
 
 export type TimeGroup = 'today' | 'yesterday' | 'previous_days' | 'older';
@@ -27,8 +30,8 @@ export type TimeGroup = 'today' | 'yesterday' | 'previous_days' | 'older';
  * Active sessions can still be selected (e.g. to close settings or focus).
  * Deleting or switching states disable selection.
  */
-export function canSelectSession(isSwitching: boolean, isConfirmingDelete: boolean): boolean {
-  return !isSwitching && !isConfirmingDelete;
+export function canSelectSession(isSwitching: boolean, isConfirmingDelete: boolean, isRenaming = false): boolean {
+  return !isSwitching && !isConfirmingDelete && !isRenaming;
 }
 
 /**
@@ -85,27 +88,37 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   onSelectSession,
   onNewSession,
   onDeleteSession,
+  onRenameSession,
   onClose,
   locale,
   filesPanel,
   filesChangesCount,
   projectName,
+  activeTab: controlledTab,
+  onTabChange,
 }) => {
-  const [activeTab, setActiveTab] = useState<'sessions' | 'files'>('sessions');
+  const [internalTab, setInternalTab] = useState<'sessions' | 'files'>('sessions');
+  const activeTab = controlledTab ?? internalTab;
+  const setActiveTab = (tab: 'sessions' | 'files') => {
+    setInternalTab(tab);
+    onTabChange?.(tab);
+  };
   const [searchTerm, setSearchTerm] = useState('');
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
 
   const t = (key: TranslationKey, params?: Record<string, string | number>) =>
     translate(locale, key, params);
 
-  // Filter sessions by search query
+  // Filter sessions by search query (matches custom title, first message, or session id)
   const filteredSessions = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
     if (!query) return sessions;
     return sessions.filter((s) => {
-      const msg = s.firstMessage?.toLowerCase() ?? '';
+      const title = (s.customTitle || s.firstMessage || '').toLowerCase();
       const id = s.id?.toLowerCase() ?? '';
-      return msg.includes(query) || id.includes(query);
+      return title.includes(query) || id.includes(query);
     });
   }, [sessions, searchTerm]);
 
@@ -277,6 +290,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                         Boolean(session.path && session.path.trim().length > 0);
 
                       const isConfirmingDelete = canDelete && deletingPath === session.path;
+                      const isRenaming = renamingId === session.id;
+                      const canSelect = canSelectSession(isSwitching, isConfirmingDelete, isRenaming);
 
                       const formattedTime = formatSessionTimestamp(
                         session.modifiedAt || session.createdAt,
@@ -300,12 +315,12 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                           tabIndex={isSwitching || isConfirmingDelete ? -1 : 0}
                           aria-current={isActive ? 'true' : undefined}
                           onClick={() => {
-                            if (canSelectSession(isSwitching, isConfirmingDelete)) {
+                            if (canSelect) {
                               onSelectSession(session);
                             }
                           }}
                           onKeyDown={(e) => {
-                            if ((e.key === 'Enter' || e.key === ' ') && canSelectSession(isSwitching, isConfirmingDelete)) {
+                            if ((e.key === 'Enter' || e.key === ' ') && canSelect) {
                               e.preventDefault();
                               onSelectSession(session);
                             }
@@ -336,17 +351,107 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                                 </button>
                               </div>
                             </div>
+                          ) : isRenaming ? (
+                            <div className="item-rename-box" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="text"
+                                className="input-session-rename"
+                                value={renameDraft}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    if (renameDraft.trim() && onRenameSession) {
+                                      onRenameSession(session, renameDraft.trim());
+                                    }
+                                    setRenamingId(null);
+                                  } else if (e.key === 'Escape') {
+                                    setRenamingId(null);
+                                  }
+                                }}
+                                placeholder={t('sidebar.rename_placeholder')}
+                                autoFocus
+                              />
+                              <div className="item-rename-actions">
+                                <button
+                                  type="button"
+                                  className="btn-confirm-rename"
+                                  onClick={() => {
+                                    if (renameDraft.trim() && onRenameSession) {
+                                      onRenameSession(session, renameDraft.trim());
+                                    }
+                                    setRenamingId(null);
+                                  }}
+                                  aria-label={t('action.save')}
+                                  title={t('action.save')}
+                                >
+                                  ✓
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-cancel-rename"
+                                  onClick={() => setRenamingId(null)}
+                                  aria-label={t('action.cancel')}
+                                  title={t('action.cancel')}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </div>
                           ) : (
                             <>
                               <div className="item-title-row">
-                                <span className="item-title" title={session.firstMessage}>
-                                  {session.firstMessage || t('sidebar.no_messages')}
+                                <span className="item-title" title={session.customTitle || session.firstMessage}>
+                                  {session.customTitle || session.firstMessage || t('sidebar.no_messages')}
                                 </span>
                                 <div className="item-badges-and-actions">
+                                  {session.status === 'working' && (
+                                    <span className="session-status-badge status-working" title={t('sidebar.status_working')}>
+                                      <span className="mini-spinner" aria-hidden="true" />
+                                      <span>{t('sidebar.status_working')}</span>
+                                    </span>
+                                  )}
+                                  {session.status === 'waiting' && (
+                                    <span className="session-status-badge status-waiting" title={t('sidebar.status_waiting')}>
+                                      <span aria-hidden="true">⚠</span>
+                                      <span>{t('sidebar.status_waiting')}</span>
+                                    </span>
+                                  )}
+                                  {session.status === 'completed' && (
+                                    <span className="session-status-badge status-completed" title={t('sidebar.status_completed')}>
+                                      <span aria-hidden="true">✓</span>
+                                      <span>{t('sidebar.status_completed')}</span>
+                                    </span>
+                                  )}
+                                  {session.status === 'unloaded' && (
+                                    <span className="session-status-badge status-unloaded" title={t('sidebar.status_unloaded')}>
+                                      <span aria-hidden="true">○</span>
+                                      <span>{t('sidebar.status_unloaded')}</span>
+                                    </span>
+                                  )}
                                   {isActive && (
                                     <span className="active-badge">
                                       {t('sidebar.active')}
                                     </span>
+                                  )}
+                                  {onRenameSession && (
+                                    <button
+                                      type="button"
+                                      className="btn-item-rename"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setRenamingId(session.id);
+                                        setRenameDraft(session.customTitle || session.firstMessage || '');
+                                        setDeletingPath(null);
+                                      }}
+                                      title={t('sidebar.rename_title')}
+                                      aria-label={t('sidebar.rename_title')}
+                                      disabled={isSwitching}
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                                      </svg>
+                                    </button>
                                   )}
                                   {canDelete && (
                                     <button

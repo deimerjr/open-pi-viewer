@@ -14,7 +14,8 @@ export interface UseWorkspaceViewOptions {
 
 export interface UseWorkspaceViewResult {
   viewingFile: WorkspaceFileContent | null;
-  openFile: (file: WorkspaceFileContent) => void;
+  fileViewerInitialTab: 'content' | 'diff';
+  openFile: (file: WorkspaceFileContent, initialTab?: 'content' | 'diff') => void;
   closeFile: () => void;
   fileTreeRefreshTrigger: number;
   requestFileTreeRefresh: () => void;
@@ -42,6 +43,7 @@ export function useWorkspaceView(
       : refreshIntervalArg;
 
   const [viewingFile, setViewingFile] = useState<WorkspaceFileContent | null>(null);
+  const [fileViewerInitialTab, setFileViewerInitialTab] = useState<'content' | 'diff'>('content');
   const [fileTreeRefreshTrigger, setFileTreeRefreshTrigger] = useState<number>(0);
   const [gitChangesCount, setGitChangesCount] = useState<number>(() => {
     const cached = getWorkspaceSnapshot(workingDirectory);
@@ -51,7 +53,8 @@ export function useWorkspaceView(
   const cwdRef = useRef(workingDirectory);
   cwdRef.current = workingDirectory;
 
-  const openFile = (file: WorkspaceFileContent) => {
+  const openFile = (file: WorkspaceFileContent, initialTab: 'content' | 'diff' = 'content') => {
+    setFileViewerInitialTab(initialTab);
     setViewingFile(file);
   };
 
@@ -149,6 +152,7 @@ export function useWorkspaceView(
 
   return {
     viewingFile,
+    fileViewerInitialTab,
     openFile,
     closeFile,
     fileTreeRefreshTrigger,

@@ -43,6 +43,7 @@ export interface AuthoritativeMessage {
 export interface SendPromptPayload {
   id: string;
   message: string;
+  streamingBehavior?: 'followUp' | 'steer';
 }
 
 export interface SendPromptResult {

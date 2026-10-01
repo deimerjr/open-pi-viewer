@@ -30,6 +30,7 @@ import {
   isAppTheme,
   resolveTheme,
   SUPPORTED_THEMES,
+  BUILTIN_THEMES,
   watchSystemTheme,
   type ResolvedTheme,
 } from '@shared/theme';
@@ -299,11 +300,13 @@ test('i18n: setDocumentLanguage updates document element lang attribute safely',
 // ---------------------------------------------------------------------------
 
 test('theme: supported themes include dark, light, and system with dark as default', () => {
-  assert.deepStrictEqual(SUPPORTED_THEMES, ['dark', 'light', 'system']);
+  assert.deepStrictEqual(BUILTIN_THEMES, ['dark', 'light', 'system']);
   assert.strictEqual(DEFAULT_THEME, 'dark');
+  assert.ok(SUPPORTED_THEMES.includes('DjRomoro'));
   assert.strictEqual(isAppTheme('dark'), true);
   assert.strictEqual(isAppTheme('light'), true);
   assert.strictEqual(isAppTheme('system'), true);
+  assert.strictEqual(isAppTheme('DjRomoro'), true);
   assert.strictEqual(isAppTheme('solarized'), false);
   assert.strictEqual(isAppTheme(null), false);
 });

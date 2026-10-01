@@ -24,14 +24,18 @@ export interface SessionPersistenceStatus {
   fileExists: boolean;
 }
 
+export type SessionRuntimeStatus = 'working' | 'completed' | 'waiting' | 'unloaded';
+
 export interface SessionSummary {
   id: string;
   path: string;
   createdAt?: string;
   modifiedAt?: string;
   firstMessage: string;
+  customTitle?: string;
   messageCount: number;
   isActive: boolean;
+  status?: SessionRuntimeStatus;
 }
 
 export interface SwitchSessionResult {

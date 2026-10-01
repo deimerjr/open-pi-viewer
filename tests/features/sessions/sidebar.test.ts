@@ -10,6 +10,7 @@ import {
   canStartNewConversation,
   decideSelectSession,
 } from '@features/sessions/session-actions';
+import { loadSessionTitles, saveSessionTitle } from '@core/session';
 import type { SessionSummary } from '@core/types/sessions';
 
 test('categorizeSessionTime: classifies timestamps into today, yesterday, previous_days, and older', () => {
@@ -241,5 +242,31 @@ test('App handleNewConversation logic: closes settings when open', () => {
   assert.strictEqual(canStartNewConversation(false, false, false), true);
   assert.strictEqual(canStartNewConversation(true, false, false), false);
 });
+
+test('SessionSidebar: canSelectSession blocks selection when isRenaming is true', () => {
+  assert.strictEqual(canSelectSession(false, false, false), true);
+  assert.strictEqual(canSelectSession(false, false, true), false);
+  assert.strictEqual(canSelectSession(true, false, false), false);
+  assert.strictEqual(canSelectSession(false, true, false), false);
+});
+
+test('Session titles: saveSessionTitle and loadSessionTitles roundtrip cleanly', () => {
+  const mockStorage: Record<string, string> = {};
+  const fakeStorage = {
+    getItem: (k: string) => mockStorage[k] ?? null,
+    setItem: (k: string, v: string) => { mockStorage[k] = v; },
+    removeItem: (k: string) => { delete mockStorage[k]; },
+  };
+
+  saveSessionTitle('sess-100', 'Mi Nombre Personalizado', fakeStorage as any);
+  const loaded = loadSessionTitles(fakeStorage as any);
+  assert.strictEqual(loaded['sess-100'], 'Mi Nombre Personalizado');
+
+  // Blank title removes it
+  saveSessionTitle('sess-100', '', fakeStorage as any);
+  const reloaded = loadSessionTitles(fakeStorage as any);
+  assert.strictEqual(reloaded['sess-100'], undefined);
+});
+
 
 

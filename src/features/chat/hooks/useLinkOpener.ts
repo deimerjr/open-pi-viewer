@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LinkOpenerController, type OpenUrlResult, type OpenUrlStatus } from '@infra/opener';
+import {
+  LinkOpenerController,
+  type LinkOpenerControllerOptions,
+  type OpenUrlStatus,
+} from '@infra/opener';
 
-export interface UseLinkOpenerOptions {
-  timeoutMs?: number;
-  debounceMs?: number;
-  openFn?: (url: string) => Promise<OpenUrlResult>;
-}
+export interface UseLinkOpenerOptions extends LinkOpenerControllerOptions {}
 
 /**
  * React hook wrapping LinkOpenerController with unmount cleanup and StrictMode safety.

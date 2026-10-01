@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   abortPi,
   sendPromptPi,
@@ -9,7 +9,8 @@ import type { ChatAction } from '@core/reducer';
 import type { AttachedFile } from '../types';
 
 export interface UsePromptStateOptions {
-  isReadyToSend: boolean;
+  isReadyToSend?: boolean;
+  isReadyToInput?: boolean;
   isBusy: boolean;
   pendingPromptId: string | null;
   dispatch: React.Dispatch<ChatAction>;
@@ -26,6 +27,7 @@ export interface UsePromptStateOptions {
  */
 export function usePromptState({
   isReadyToSend,
+  isReadyToInput,
   isBusy,
   pendingPromptId,
   dispatch,
@@ -33,6 +35,7 @@ export function usePromptState({
 }: UsePromptStateOptions) {
   const [prompt, setPrompt] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const canInput = isReadyToInput ?? isReadyToSend ?? true;
 
   const addAttachedFiles = (files: AttachedFile[]) => {
     setAttachedFiles((prev) => [...prev, ...files]);
@@ -46,21 +49,58 @@ export function usePromptState({
     setAttachedFiles([]);
   };
 
+  const insertCodeIntoPrompt = useCallback(
+    (code: string, fileName?: string, lang?: string) => {
+      let textToInsert = '';
+      const cleanLang = (lang || '').toLowerCase();
+      if (cleanLang === 'bash' || cleanLang === 'sh' || cleanLang === 'zsh') {
+        textToInsert = code;
+      } else {
+        const header = fileName && lang ? `${lang}:${fileName}` : (fileName || lang || '');
+        textToInsert = header ? `\`\`\`${header}\n${code}\n\`\`\`` : `\`\`\`\n${code}\n\`\`\``;
+      }
+
+      setPrompt((prev) => {
+        const trimmed = prev.trim();
+        if (!trimmed) {
+          return textToInsert;
+        }
+        return `${trimmed}\n\n${textToInsert}`;
+      });
+    },
+    [setPrompt]
+  );
+
   // handleSend/handleAbort/handleKeyDown stay plain functions, recreated every render,
   // exactly as they were in App.tsx (they were never wrapped in useCallback there).
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = prompt.trim();
     const hasAttachments = attachedFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || !isReadyToSend) return;
+    if ((!trimmed && !hasAttachments) || !canInput) return;
+
+    // Detect if agent is currently busy: if busy, this is NATURALLY an enqueue (followUp)!
+    const isQueued = isBusy;
+    const streamingBehavior = isQueued ? 'followUp' : undefined;
 
     const defaultAttachmentText = attachedFiles.some((f) => f.type === 'image')
       ? '(see attached image)'
       : '(see attached file)';
     const reqId = generatePromptRequestId();
+
+    const imagePreviewList = attachedFiles
+      .filter((f) => f.type === 'image' && (f.previewUrl || f.data))
+      .map((f) => f.previewUrl || (f.data ? (f.data.startsWith('data:') ? f.data : `data:${f.mimeType};base64,${f.data}`) : ''))
+      .filter(Boolean);
+
     dispatch({
       type: 'PROMPT_SUBMIT',
-      payload: { id: reqId, message: trimmed || defaultAttachmentText },
+      payload: {
+        id: reqId,
+        message: trimmed || defaultAttachmentText,
+        isQueued,
+        images: imagePreviewList.length > 0 ? imagePreviewList : undefined,
+      },
     });
 
     const imageAttachments: PromptImageAttachment[] = attachedFiles
@@ -100,7 +140,10 @@ export function usePromptState({
       const res = await sendPromptPi(
         reqId,
         messageToSend,
-        imageAttachments.length > 0 ? imageAttachments : undefined
+        {
+          images: imageAttachments.length > 0 ? imageAttachments : undefined,
+          streamingBehavior,
+        }
       );
       if (!res?.id) {
         throw new Error('Backend response missing required request ID');
@@ -151,5 +194,6 @@ export function usePromptState({
     handleSend,
     handleAbort,
     handleKeyDown,
+    insertCodeIntoPrompt,
   };
 }

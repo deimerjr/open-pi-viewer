@@ -6,7 +6,10 @@ import type { ChatSessionState } from '../types/chat-state';
 import type { ChatAction } from './index';
 
 export type MessagingAction =
-  | { type: 'PROMPT_SUBMIT'; payload: { id: string; message: string } }
+  | {
+      type: 'PROMPT_SUBMIT';
+      payload: { id: string; message: string; isQueued?: boolean; images?: string[] };
+    }
   | { type: 'PROMPT_ACCEPTED'; payload: { id: string } }
   | { type: 'PROMPT_REJECTED'; payload: { id: string; error: string } }
   | {
@@ -28,7 +31,9 @@ export type MessagingAction =
   | { type: 'EVENT_AGENT_END'; payload?: { willRetry?: boolean } }
   | { type: 'EVENT_AGENT_SETTLED' }
   | { type: 'ABORT_CLICKED' }
-  | { type: 'ABORT_COMPLETED'; payload?: { promptId?: string | null } };
+  | { type: 'ABORT_COMPLETED'; payload?: { promptId?: string | null } }
+  | { type: 'CLEAR_MESSAGES' }
+  | { type: 'ADD_SYSTEM_MESSAGE'; payload: { message: string } };
 
 /**
  * Messaging slice: prompt submission, streaming assistant deltas, message reconciliation, abort.
@@ -44,6 +49,7 @@ export function messagingReducer(
         role: 'user',
         content: action.payload.message,
         timestamp: new Date().toLocaleTimeString(),
+        images: action.payload.images && action.payload.images.length > 0 ? action.payload.images : undefined,
       };
 
       return {
@@ -52,7 +58,9 @@ export function messagingReducer(
         agentActivity: 'busy',
         pendingPromptId: action.payload.id,
         statusLabel: 'Running',
-        statusDetail: 'Prompt sent, waiting for agent response...',
+        statusDetail: action.payload.isQueued
+          ? 'Instrucción encolada en Pi...'
+          : 'Prompt sent, waiting for agent response...',
         lastError: null,
       };
     }
@@ -406,6 +414,28 @@ export function messagingReducer(
         statusDetail: isConnected
           ? 'Agent operation aborted'
           : state.statusDetail,
+      };
+    }
+
+    case 'CLEAR_MESSAGES': {
+      return {
+        ...state,
+        messages: [],
+        activeAssistantMessageId: null,
+        pendingPromptId: null,
+      };
+    }
+
+    case 'ADD_SYSTEM_MESSAGE': {
+      const sysMessage: ChatMessage = {
+        id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        role: 'system',
+        content: action.payload.message,
+        timestamp: new Date().toLocaleTimeString(),
+      };
+      return {
+        ...state,
+        messages: [...state.messages, sysMessage],
       };
     }
 

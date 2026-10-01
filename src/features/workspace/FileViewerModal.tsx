@@ -9,6 +9,7 @@ export interface FileViewerModalProps {
   workingDirectory?: string;
   onClose: () => void;
   locale: SupportedLocale;
+  initialTab?: 'content' | 'diff';
 }
 
 export interface ParsedDiffLine {
@@ -101,10 +102,11 @@ export const FileViewerModal: React.FC<FileViewerModalProps> = ({
   workingDirectory,
   onClose,
   locale,
+  initialTab = 'content',
 }) => {
   const [copied, setCopied] = useState(false);
   const [isLineWrap, setIsLineWrap] = useState(true);
-  const [activeTab, setActiveTab] = useState<'content' | 'diff'>('content');
+  const [activeTab, setActiveTab] = useState<'content' | 'diff'>(initialTab);
   const [diffData, setDiffData] = useState<WorkspaceFileDiff | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
 

@@ -5,6 +5,7 @@ import {
   getSddProfilesPi,
   saveMcpServerPi,
   deleteMcpServerPi,
+  getMessagesPi,
 } from '@infra/bridge';
 import { ProjectDock } from '@features/projects/ProjectDock';
 import { mapProvidersToArray, resolveModelDefaultThinkingLevel } from '@features/providers/providers';
@@ -24,6 +25,24 @@ import {
   MarkdownContent,
   shouldRenderAsMarkdown,
 } from '@features/chat/MarkdownContent';
+import { ProcessGroupCard } from '@features/chat/components/ProcessGroupCard';
+import { InteractiveQuestionCard } from '@features/chat/components/InteractiveQuestionCard';
+import { UserMessageContent } from '@features/chat/components/UserMessageContent';
+import {
+  groupChatMessages,
+  extractProcessItemsFromMessage,
+  createProcessGroup,
+  isInteractiveUserTool,
+} from '@core/process-grouping';
+import { getLastAssistantCodeBlocks } from '@core/markdown';
+import { copyText } from '@shared/clipboard';
+import { isAppTheme } from '@shared/theme';
+import { CommandPalettePopover } from '@features/chat/components/CommandPalettePopover';
+import {
+  matchCommands,
+  parseCommandInput,
+  type CommandDefinition,
+} from '@core/commands/registry';
 import { PromptControls } from '@features/chat/PromptControls';
 import { isMessageEmpty, calculateContextMetrics } from '@core/prompt-controls-utils';
 import {
@@ -47,6 +66,7 @@ import {
   type ProfileSummary,
   type ProfileActivationEventDetail,
 } from '@core/types/profiles';
+import type { ToolCallBlock } from '@core/types/messages';
 import { ProfileModal } from '@features/profiles/components/ProfileModal';
 import { useProfiles } from '@features/profiles/hooks/useProfiles';
 import { STATUS_CONFIG, type AppStatusState } from '@core/icon-status';
@@ -57,7 +77,11 @@ import {
 } from '@infra/icon-status';
 import type { ConnectConfig, ConnectResult } from '@core/types/connection';
 import { useWorkspaceView } from '@features/workspace/hooks/useWorkspaceView';
-import { normalizeWorkspaceKey } from '@features/workspace/workspace-cache';
+import { normalizeWorkspaceKey, getWorkspaceSnapshot } from '@features/workspace/workspace-cache';
+import { exportToMarkdown, exportToJson, generateExportFilename } from '@core/export';
+import { triggerFileDownload } from '@infra/download';
+import { readWorkspaceFilePi } from '@infra/bridge';
+import type { SessionSummary } from '@core/types/sessions';
 import { useChatScroll } from '@features/chat/hooks/useChatScroll';
 import { useSessionEvents } from '@features/chat/hooks/useSessionEvents';
 import { useEngramProject } from '@features/chat/hooks/useEngramProject';
@@ -66,6 +90,7 @@ import {
   type AnsweredQuestionRecord,
 } from '@features/chat/hooks/useExtensionUiDialog';
 import { ExtensionUiPromptBar } from '@features/chat/components/ExtensionUiPromptBar';
+import { computeWorkAnimationStyles } from '@infra/preferences';
 import { usePreferences } from '@features/settings/hooks/usePreferences';
 import { useConnection } from '@features/settings/hooks/useConnection';
 import { useProjects } from '@features/projects/hooks/useProjects';
@@ -98,13 +123,71 @@ export const App: React.FC = () => {
   const isConnected = state.connectionStatus === 'connected';
   const isConnecting = state.connectionStatus === 'connecting';
   const isBusy = state.agentActivity === 'busy';
-  const isReadyToSend = isConnected && state.isHydrated && !isBusy && !state.isResetting;
+  const isReadyToInput = isConnected && state.isHydrated && !state.isResetting;
+  const isReadyToSend = isReadyToInput && !isBusy;
   const { isHighContext } = calculateContextMetrics(state.sessionStats, state.modelInfo, state.availableModels);
+
+  // Preference for compacting processes by category (+ / -)
+  const [isCompactProcesses, setIsCompactProcesses] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('pi_viewer_compact_processes');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleCompactProcesses = useCallback(() => {
+    setIsCompactProcesses((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('pi_viewer_compact_processes', String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const renderableChatItems = useMemo(() => {
+    const nonEmpty = state.messages.filter((msg) => !isMessageEmpty(msg));
+    return groupChatMessages(nonEmpty, isCompactProcesses);
+  }, [state.messages, isCompactProcesses]);
+
+  // Tail-First progressive chat window: render initial window to keep UI instant on large sessions
+  const INITIAL_VISIBLE_ITEMS = 40;
+  const BATCH_LOAD_ITEMS = 40;
+  const [visibleItemsCount, setVisibleItemsCount] = useState<number>(INITIAL_VISIBLE_ITEMS);
+  const prevItemsLengthRef = useRef(renderableChatItems.length);
+
+  // Reset window when session switches
+  useEffect(() => {
+    setVisibleItemsCount(INITIAL_VISIBLE_ITEMS);
+    prevItemsLengthRef.current = renderableChatItems.length;
+  }, [state.sessionId]);
+
+  // When new messages arrive during an active turn, expand the window so recent additions stay visible
+  useEffect(() => {
+    const diff = renderableChatItems.length - prevItemsLengthRef.current;
+    if (diff > 0) {
+      setVisibleItemsCount((prev) => prev + diff);
+    }
+    prevItemsLengthRef.current = renderableChatItems.length;
+  }, [renderableChatItems.length]);
+
+  const hasOlderItems = renderableChatItems.length > visibleItemsCount;
+  const displayedChatItems = useMemo(() => {
+    if (!hasOlderItems) return renderableChatItems;
+    return renderableChatItems.slice(-visibleItemsCount);
+  }, [renderableChatItems, hasOlderItems, visibleItemsCount]);
+
+  const hiddenOlderCount = hasOlderItems ? renderableChatItems.length - visibleItemsCount : 0;
 
   // Separate Settings draft state for connection configuration. settingsDraft's initial
   // value depends on `config`, which now comes from useConnection below, so its
   // declaration moves there too; the other settings-panel state is independent and stays.
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    'general' | 'theme' | 'profiles' | 'providers' | 'mcp' | 'extensions'
+  >('general');
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsStorageNotice, setSettingsStorageNotice] = useState<string | null>(null);
 
@@ -122,6 +205,47 @@ export const App: React.FC = () => {
     showSettings,
   });
 
+  const handleLoadMoreOlderItems = useCallback(() => {
+    const viewport = chatViewportRef.current;
+    const oldScrollHeight = viewport ? viewport.scrollHeight : 0;
+    const oldScrollTop = viewport ? viewport.scrollTop : 0;
+
+    setVisibleItemsCount((prev) => Math.min(prev + BATCH_LOAD_ITEMS, renderableChatItems.length));
+
+    requestAnimationFrame(() => {
+      if (viewport) {
+        const heightDiff = viewport.scrollHeight - oldScrollHeight;
+        viewport.scrollTop = oldScrollTop + heightDiff;
+      }
+    });
+  }, [renderableChatItems.length, chatViewportRef]);
+
+  const handleLoadAllOlderItems = useCallback(async () => {
+    setVisibleItemsCount(renderableChatItems.length);
+    try {
+      const allRaw = await getMessagesPi();
+      if (allRaw && allRaw.length > state.messages.length) {
+        const hydrated = hydrateChatMessages(allRaw);
+        dispatch({
+          type: 'SWITCH_SESSION_SUCCESS',
+          payload: {
+            sessionId: state.sessionId || '',
+            sessionFile: state.sessionFile || '',
+            messages: hydrated,
+          },
+        });
+        setVisibleItemsCount(hydrated.length);
+      }
+    } catch {}
+  }, [renderableChatItems.length, state.messages.length, state.sessionId, state.sessionFile, dispatch]);
+
+  const onViewportScroll = useCallback(
+    (e: React.UIEvent<HTMLElement>) => {
+      handleViewportScroll(e);
+    },
+    [handleViewportScroll]
+  );
+
   // Prompt cluster: draft text, send/abort, and the Enter-to-send binding.
   // `pinAndJumpToBottom` is T5a's scroll primitive, injected here rather
   // than imported by the hook itself.
@@ -131,16 +255,77 @@ export const App: React.FC = () => {
     attachedFiles,
     addAttachedFiles,
     removeAttachedFile,
+    clearAttachedFiles,
     handleSend,
     handleAbort,
     handleKeyDown,
+    insertCodeIntoPrompt,
   } = usePromptState({
+    isReadyToInput,
     isReadyToSend,
     isBusy,
     pendingPromptId: state.pendingPromptId,
     dispatch,
     pinAndJumpToBottom,
   });
+
+  const handleOpenImageInNewTab = useCallback((e: React.MouseEvent, src: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!src) return;
+    if (src.startsWith('data:')) {
+      try {
+        const parts = src.split(',');
+        const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/png';
+        const bstr = atob(parts[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        const blob = new Blob([u8arr], { type: mime });
+        const blobUrl = URL.createObjectURL(blob);
+        window.open(blobUrl, '_blank');
+        return;
+      } catch {}
+    }
+    window.open(src, '_blank');
+  }, []);
+
+  // Global shortcuts from pi-messages (Alt+C: copy code, Alt+I: insert into prompt)
+  useEffect(() => {
+    const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+
+      const key = e.key.toLowerCase();
+      if (key === 'c') {
+        const blocks = getLastAssistantCodeBlocks(state.messages);
+        if (blocks.length === 0) return;
+        e.preventDefault();
+        if (blocks.length === 1) {
+          void copyText(blocks[0].code);
+        } else {
+          const allCode = blocks.map((b) => b.code).join('\n\n');
+          void copyText(allCode);
+        }
+      } else if (key === 'i') {
+        const blocks = getLastAssistantCodeBlocks(state.messages);
+        if (blocks.length === 0) return;
+        e.preventDefault();
+        const target = blocks[blocks.length - 1];
+        insertCodeIntoPrompt(target.code, target.fileName, target.language);
+        const textarea = document.querySelector<HTMLTextAreaElement>('.prompt-input');
+        if (textarea) {
+          textarea.focus();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalShortcuts);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalShortcuts);
+    };
+  }, [state.messages, insertCodeIntoPrompt]);
 
   // Connection cluster: persisted ConnectConfig, the connection-load storage warning, and
   // the StartupManager instance (attempt lifecycle, coalescing, retry). The onConnect*
@@ -248,6 +433,7 @@ export const App: React.FC = () => {
 
   const {
     viewingFile,
+    fileViewerInitialTab,
     openFile,
     closeFile,
     fileTreeRefreshTrigger,
@@ -258,6 +444,9 @@ export const App: React.FC = () => {
     workingDirectory: config.workingDirectory,
     refreshInterval: config.fileTreeRefreshInterval,
   });
+
+  const [isZenMode, setIsZenMode] = useState<boolean>(false);
+  const [sidebarTab, setSidebarTab] = useState<'sessions' | 'files'>('sessions');
 
   // settingsDraft's initial value depends on `config`, now sourced from useConnection above.
   const [settingsDraft, setSettingsDraft] = useState<ConnectConfig>(config);
@@ -271,9 +460,17 @@ export const App: React.FC = () => {
     dismissPreferencesWarning,
     handleThemeChange,
     handleLanguageChange,
+    handleWorkAnimationChange,
+    handleCustomThemeColorsChange,
+    handleCustomBackgroundChange,
     setNotifications,
     t,
   } = usePreferences();
+
+  const workAnimStyles = useMemo(
+    () => computeWorkAnimationStyles(preferences.workAnimation),
+    [preferences.workAnimation]
+  );
 
   // Projects cluster: registry state and handlers. Real decision logic (already-active/
   // isBusy no-op guard, and whether removing the active project should switch the working
@@ -350,6 +547,21 @@ export const App: React.FC = () => {
     handleBack,
   } = useExtensionUiDialog();
 
+  const handleSelectInteractiveOption = useCallback(
+    (label: string) => {
+      if (activeDialog) {
+        handleDialogSelect(activeDialog.itemKey, label);
+      } else {
+        setPrompt(label);
+        const textarea = document.querySelector<HTMLTextAreaElement>('#prompt-input');
+        if (textarea) {
+          textarea.focus();
+        }
+      }
+    },
+    [activeDialog, handleDialogSelect, setPrompt]
+  );
+
   const handleDialogBack = useCallback(
     (
       itemKey: string,
@@ -405,7 +617,7 @@ export const App: React.FC = () => {
   // early return, the busy/switching guards, and what happens when a delete or a reset
   // targets the active session) lives in the pure, tested functions in
   // features/sessions/session-actions.ts.
-  const { handleSelectSession, handleDeleteSession, handleNewConversation } = useSessions({
+  const { handleSelectSession, handleDeleteSession, handleRenameSession, handleNewConversation } = useSessions({
       activeProjectId: projectsRegistry.activeProjectId,
       connectionStatus: state.connectionStatus,
       config,
@@ -513,11 +725,33 @@ export const App: React.FC = () => {
   // Project Pi resources with global defaults & project overrides for the chat prompt bar
   const projectPiResources = usePiResources({ cwd: config.workingDirectory });
 
+  // Reactive refresh of MCP servers and Pi resources on session switch or cwd change
+  useEffect(() => {
+    if (state.connectionStatus === 'connected') {
+      void projectMcp.refreshServers();
+      void globalMcp.refreshServers();
+      void projectPiResources.refreshResources();
+      void globalPiResources.refreshResources();
+    }
+  }, [state.sessionId, state.connectionStatus, config.workingDirectory]);
+
   // Profiles hook for project-scoped profile selector & global settings
   const profilesHook = useProfiles({
     cwd: config.workingDirectory,
     availableModels: state.availableModels,
   });
+
+  // Zen Mode Escape listener
+  useEffect(() => {
+    if (!isZenMode) return;
+    const handleZenEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !viewingFile && !showSettings && !profilesHook.isModalOpen) {
+        setIsZenMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleZenEsc);
+    return () => window.removeEventListener('keydown', handleZenEsc);
+  }, [isZenMode, viewingFile, showSettings, profilesHook.isModalOpen]);
 
   // Engram project detection for current working directory
   const {
@@ -527,6 +761,7 @@ export const App: React.FC = () => {
     checkCloudStatus,
     isEnrolling,
     enrollProject,
+    observations: engramObservations,
   } = useEngramProject({ cwd: config.workingDirectory });
 
   const handleSelectProfile = useCallback(
@@ -602,10 +837,14 @@ export const App: React.FC = () => {
     profilesHook,
   ]);
 
-  const handleOpenSettings = () => {
+  const handleOpenSettings = (
+    tab?: 'general' | 'theme' | 'profiles' | 'providers' | 'mcp' | 'extensions' | React.MouseEvent
+  ) => {
+    const targetTab = typeof tab === 'string' ? tab : 'general';
     setSettingsDraft(config);
     setSettingsError(null);
     setSettingsStorageNotice(null);
+    setSettingsInitialTab(targetTab);
     setShowSettings(true);
   };
 
@@ -656,6 +895,669 @@ export const App: React.FC = () => {
     setShowSettings(false);
   };
 
+  // Command palette & recognition for Gentle-AI, Gentle Shell and Pi
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+
+  const matchedCommands = useMemo(() => {
+    const trimmed = prompt.trimStart();
+    if (trimmed.startsWith('/') && !trimmed.includes(' ')) {
+      return matchCommands(trimmed);
+    }
+    return [];
+  }, [prompt]);
+
+  useEffect(() => {
+    if (matchedCommands.length > 0) {
+      setShowCommandPalette(true);
+      setSelectedCommandIndex(0);
+    } else {
+      setShowCommandPalette(false);
+    }
+  }, [matchedCommands.length, prompt]);
+
+  const handleCopyCodeAction = useCallback((arg?: string) => {
+    const blocks = getLastAssistantCodeBlocks(state.messages);
+    if (blocks.length === 0) return;
+    if (arg === 'all') {
+      const allCode = blocks.map((b) => b.code).join('\n\n');
+      void copyText(allCode);
+    } else {
+      const idx = arg ? parseInt(arg, 10) : NaN;
+      if (!isNaN(idx) && idx >= 1 && idx <= blocks.length) {
+        void copyText(blocks[idx - 1].code);
+      } else {
+        void copyText(blocks[blocks.length - 1].code);
+      }
+    }
+  }, [state.messages]);
+
+  const handleInsertCodeAction = useCallback((_arg?: string) => {
+    const blocks = getLastAssistantCodeBlocks(state.messages);
+    if (blocks.length === 0) return;
+    const target = blocks[blocks.length - 1];
+    insertCodeIntoPrompt(target.code, target.fileName, target.language);
+    const textarea = document.querySelector<HTMLTextAreaElement>('#prompt-input');
+    if (textarea) {
+      textarea.focus();
+    }
+  }, [state.messages, insertCodeIntoPrompt]);
+
+  const renderHelpGuide = useCallback(() => {
+    const isEs = preferences.language === 'es';
+    const guideMarkdown = isEs
+      ? `### 🛠 Catálogo de Comandos Reconocidos en Pi-Viewer
+
+#### 🤖 Gentle AI / SDD
+| Comando | Descripción | Uso |
+| :--- | :--- | :--- |
+| \`/sdd-init\` | Inicializar especificación formal y estructura OpenSpec/SDD | \`/sdd-init [nombre]\` |
+| \`/sdd-explore\` | Exploración arquitectónica y mapeo de contexto existente | \`/sdd-explore\` |
+| \`/sdd-proposal\` | Generar o revisar la propuesta formal de cambios | \`/sdd-proposal\` |
+| \`/sdd-spec\` | Especificación de requerimientos y criterios de aceptación | \`/sdd-spec\` |
+| \`/sdd-design\` | Documento de diseño técnico y decisiones arquitectónicas | \`/sdd-design\` |
+| \`/sdd-tasks\` | Desglose de tareas de implementación ejecutables | \`/sdd-tasks\` |
+| \`/sdd-apply\` | Ejecutar tareas de implementación de la fase SDD actual | \`/sdd-apply\` |
+| \`/sdd-verify\` | Verificación estricta, suite de pruebas y validación | \`/sdd-verify\` |
+| \`/sdd-archive\` | Archivar el cambio SDD verificado y aprobado formalmente | \`/sdd-archive\` |
+| \`/sdd-profiles\` | Administrar o listar perfiles de modelos para subagentes | \`/sdd-profiles\` |
+| \`/sdd-profile-switch\` | Cambiar perfil activo de subagentes y SDD | \`/sdd-profile-switch <nombre>\` |
+| \`/judgment-day\` | Revisión ciega dual adversarial (\`/juzgar\`) | \`/judgment-day\` |
+| \`/branch-pr\` | Crear o preparar Pull Request con verificación de issues | \`/branch-pr\` |
+| \`/chained-pr\` | Dividir cambios extensos (>400 líneas) en PRs en cadena | \`/chained-pr\` |
+| \`/work-unit-commits\` | Planificar commits atómicos como unidades de trabajo | \`/work-unit-commits\` |
+| \`/rdd-defect-workflow\`| Gestionar flujo de defectos por autoridad RDD y receipts | \`/rdd-defect-workflow\` |
+| \`/btw\` | Conversación lateral paralela sin interrumpir el hilo | \`/btw <pregunta>\` |
+
+#### ⚡ Gentle Shell / pi-messages
+| Comando | Descripción | Atajo |
+| :--- | :--- | :--- |
+| \`/cc\` | Copiar al portapapeles el código del último mensaje (\`/cc all\`) | \`Alt+C\` |
+| \`/ci\` | Insertar código en el editor del prompt (\`/ci all\`) | \`Alt+I\` |
+| \`/picolor\` | Configurar motor de resaltado (PiColor vs Vanilla) | \`/picolor\` |
+
+#### ⚙️ Pi Core & Controles
+| Comando | Descripción |
+| :--- | :--- |
+| \`/new\` / \`/reset\` | Iniciar nueva conversación reseteando contexto |
+| \`/clear\` | Limpiar historial visual en pantalla |
+| \`/compact\` | Alternar compactación de procesos por categoría |
+| \`/model\` | Cambiar modelo de lenguaje activo |
+| \`/thinking\` | Cambiar nivel de razonamiento (off, low, medium, high) |
+| \`/theme\` | Cambiar tema visual (DjRomoro, dark, light, etc.) |
+| \`/reload\` | Recargar y refrescar el navegador y la sesión |
+| \`/stats\` | Ver estadísticas de tokens y contexto |
+| \`/settings\` | Abrir panel de configuración |
+| \`/mcp\` | Abrir gestión de servidores MCP |
+| \`/extensions\` | Abrir gestión de extensiones |
+| \`/profiles\` | Abrir gestión de perfiles de agentes |
+
+#### 🖥️ Interacción GUI / Workspace
+| Comando | Descripción |
+| :--- | :--- |
+| \`/open <ruta>\` | Abrir archivo en el visor de código modal (\`/view\`) |
+| \`/diff [ruta]\` | Ver diferencias Git de archivo o cambios pendientes |
+| \`/files\` | Mostrar y enfocar árbol de archivos en el panel (\`/tree\`) |
+| \`/sidebar\` | Mostrar u ocultar barra lateral de sesiones (\`/sessions\`) |
+| \`/rename <título>\` | Renombrar título de la sesión activa |
+| \`/project [nombre]\` | Cambiar o listar proyectos registrados (\`/projects\`) |
+| \`/top\` / \`/bottom\` | Desplazar chat al inicio o al final |
+| \`/export [md\|json]\`| Descargar conversación en Markdown o JSON |
+| \`/zen\` | Activar o desactivar Modo Zen de concentración (\`/focus\`) |
+| \`/detach\` | Eliminar todos los archivos adjuntos del prompt |
+`
+      : `### 🛠 Recognized Commands in Pi-Viewer
+
+#### 🤖 Gentle AI / SDD
+| Command | Description | Usage |
+| :--- | :--- | :--- |
+| \`/sdd-init\` | Initialize formal specification and OpenSpec/SDD structure | \`/sdd-init [name]\` |
+| \`/sdd-explore\` | Architectural exploration and context mapping | \`/sdd-explore\` |
+| \`/sdd-proposal\` | Generate or review formal change proposal | \`/sdd-proposal\` |
+| \`/sdd-spec\` | Requirements specification and acceptance criteria | \`/sdd-spec\` |
+| \`/sdd-design\` | Technical design document and architectural decisions | \`/sdd-design\` |
+| \`/sdd-tasks\` | Breakdown implementation tasks into work units | \`/sdd-tasks\` |
+| \`/sdd-apply\` | Execute implementation tasks of current SDD phase | \`/sdd-apply\` |
+| \`/sdd-verify\` | Strict verification, test suite and phase validation | \`/sdd-verify\` |
+| \`/sdd-archive\` | Archive verified and approved SDD change | \`/sdd-archive\` |
+| \`/sdd-profiles\` | Manage or list model profiles for subagents | \`/sdd-profiles\` |
+| \`/sdd-profile-switch\` | Switch active subagent/SDD model profile | \`/sdd-profile-switch <name>\` |
+| \`/judgment-day\` | Blind dual adversarial review | \`/judgment-day\` |
+| \`/branch-pr\` | Create or prepare PR with issue verification | \`/branch-pr\` |
+| \`/chained-pr\` | Split oversized changes (>400 lines) into chained PRs | \`/chained-pr\` |
+| \`/work-unit-commits\` | Plan atomic commits as reviewable work units | \`/work-unit-commits\` |
+| \`/rdd-defect-workflow\`| Defect workflow via review authority and receipts | \`/rdd-defect-workflow\` |
+| \`/btw\` | Side-conversation thread without interrupting main flow | \`/btw <query>\` |
+
+#### ⚡ Gentle Shell / pi-messages
+| Command | Description | Shortcut |
+| :--- | :--- | :--- |
+| \`/cc\` | Copy code to clipboard from last message (\`/cc all\`) | \`Alt+C\` |
+| \`/ci\` | Insert code into prompt editor (\`/ci all\`) | \`Alt+I\` |
+| \`/picolor\` | Configure syntax highlighting engine (PiColor vs Vanilla) | \`/picolor\` |
+
+#### ⚙️ Pi Core & Controls
+| Command | Description |
+| :--- | :--- |
+| \`/new\` / \`/reset\` | Start new conversation resetting context |
+| \`/clear\` | Clear visual message history on screen |
+| \`/compact\` | Toggle process compacting mode by category |
+| \`/model\` | Switch active language model |
+| \`/thinking\` | Set thinking / reasoning level |
+| \`/theme\` | Switch visual theme (DjRomoro, dark, light, etc.) |
+| \`/reload\` | Reload and refresh browser and Pi session |
+| \`/stats\` | View session token and context statistics |
+| \`/settings\` | Open connection configuration panel |
+| \`/mcp\` | Open MCP servers management |
+| \`/extensions\` | Open Pi extensions management |
+| \`/profiles\` | Open agent profiles management |
+
+#### 🖥️ GUI & Workspace Interaction
+| Command | Description |
+| :--- | :--- |
+| \`/open <path>\` | Open file in modal code viewer (\`/view\`) |
+| \`/diff [path]\` | Open Git diff viewer for a file or pending changes |
+| \`/files\` | Open and focus file tree tab in sidebar (\`/tree\`) |
+| \`/sidebar\` | Toggle visibility of sessions and files sidebar |
+| \`/rename <title>\` | Rename active conversation title |
+| \`/project [name]\` | Switch active project or list registered projects |
+| \`/top\` / \`/bottom\` | Scroll smoothly to top or bottom of chat |
+| \`/export [md\|json]\`| Download conversation as Markdown or JSON |
+| \`/zen\` | Toggle distraction-free Zen Focus Mode (\`/focus\`) |
+| \`/detach\` | Remove all attached files or images from prompt |
+`;
+
+    dispatch({
+      type: 'ADD_SYSTEM_MESSAGE',
+      payload: { message: guideMarkdown },
+    });
+  }, [dispatch, preferences.language]);
+
+  const executeClientCommand = useCallback(
+    async (cmd: CommandDefinition, args: string) => {
+      switch (cmd.id) {
+        case 'cc':
+          handleCopyCodeAction(args);
+          setPrompt('');
+          break;
+        case 'ci':
+          handleInsertCodeAction(args);
+          setPrompt('');
+          break;
+        case 'new':
+          handleNewConversation();
+          setPrompt('');
+          break;
+        case 'clear':
+          dispatch({ type: 'CLEAR_MESSAGES' });
+          setPrompt('');
+          break;
+        case 'compact':
+          toggleCompactProcesses();
+          setPrompt('');
+          break;
+        case 'reload':
+          setPrompt('');
+          if (typeof window !== 'undefined' && window.location) {
+            window.location.reload();
+          } else {
+            handleRetry();
+          }
+          break;
+        case 'settings':
+          handleOpenSettings();
+          setPrompt('');
+          break;
+        case 'mcp':
+        case 'extensions':
+          handleOpenSettings();
+          setPrompt('');
+          break;
+        case 'profiles':
+          if (args) {
+            const match = profilesHook.profiles.find(
+              (p) => p.name.toLowerCase() === args.toLowerCase()
+            );
+            if (match) {
+              void handleSelectProfile(match);
+            }
+          } else {
+            handleOpenSettings();
+          }
+          setPrompt('');
+          break;
+        case 'theme':
+          if (args && isAppTheme(args)) {
+            handleThemeChange(args);
+          } else {
+            handleOpenSettings('theme');
+          }
+          setPrompt('');
+          break;
+        case 'thinking':
+          if (args) {
+            const validLevels = ['off', 'low', 'medium', 'high'];
+            if (validLevels.includes(args.toLowerCase())) {
+              handleSelectThinkingLevel(args.toLowerCase() as any);
+            }
+          }
+          setPrompt('');
+          break;
+        case 'model':
+          if (args) {
+            const match = state.availableModels.find(
+              (m) =>
+                Boolean((m.id && m.id.toLowerCase().includes(args.toLowerCase())) ||
+                (m.name && m.name.toLowerCase().includes(args.toLowerCase())))
+            );
+            if (match && match.provider && match.id) {
+              void handleSelectModel(match.provider, match.id);
+            }
+          }
+          setPrompt('');
+          break;
+        case 'picolor':
+          dispatch({
+            type: 'ADD_SYSTEM_MESSAGE',
+            payload: {
+              message: `🎨 **PiColor Engine**: Motor semántico activo. Integrado con la paleta de ${preferences.theme}.`,
+            },
+          });
+          setPrompt('');
+          break;
+        case 'open': {
+          const target = args.trim();
+          if (!target) {
+            dispatch({
+              type: 'ADD_SYSTEM_MESSAGE',
+              payload: {
+                message:
+                  preferences.language === 'es'
+                    ? '⚠️ Uso: `/open <ruta-archivo>` (Ej: `/open src/app/App.tsx`)'
+                    : '⚠️ Usage: `/open <file-path>` (e.g. `/open src/app/App.tsx`)',
+              },
+            });
+          } else {
+            try {
+              const fileContent = await readWorkspaceFilePi(target, config.workingDirectory);
+              openFile(fileContent, 'content');
+            } catch (err: any) {
+              dispatch({
+                type: 'ADD_SYSTEM_MESSAGE',
+                payload: {
+                  message:
+                    preferences.language === 'es'
+                      ? `⚠️ No se pudo abrir el archivo \`${target}\`: ${err?.message || 'Archivo no encontrado'}`
+                      : `⚠️ Could not open file \`${target}\`: ${err?.message || 'File not found'}`,
+                },
+              });
+            }
+          }
+          setPrompt('');
+          break;
+        }
+        case 'diff': {
+          const target = args.trim();
+          if (target) {
+            try {
+              const fileContent = await readWorkspaceFilePi(target, config.workingDirectory);
+              openFile(fileContent, 'diff');
+            } catch (err: any) {
+              dispatch({
+                type: 'ADD_SYSTEM_MESSAGE',
+                payload: {
+                  message:
+                    preferences.language === 'es'
+                      ? `⚠️ No se pudo obtener el diff de \`${target}\`: ${err?.message || 'Archivo no encontrado'}`
+                      : `⚠️ Could not get diff for \`${target}\`: ${err?.message || 'File not found'}`,
+                },
+              });
+            }
+          } else {
+            const snapshot = getWorkspaceSnapshot(config.workingDirectory);
+            const firstChanged =
+              snapshot?.gitStatus?.modifiedFiles?.[0] ||
+              snapshot?.gitStatus?.addedFiles?.[0] ||
+              snapshot?.gitStatus?.untrackedFiles?.[0];
+            if (firstChanged) {
+              try {
+                const fileContent = await readWorkspaceFilePi(firstChanged, config.workingDirectory);
+                openFile(fileContent, 'diff');
+              } catch (err: any) {
+                dispatch({
+                  type: 'ADD_SYSTEM_MESSAGE',
+                  payload: {
+                    message:
+                      preferences.language === 'es'
+                        ? `⚠️ Error al abrir diff de \`${firstChanged}\`: ${err?.message || String(err)}`
+                        : `⚠️ Error opening diff for \`${firstChanged}\`: ${err?.message || String(err)}`,
+                  },
+                });
+              }
+            } else {
+              dispatch({
+                type: 'ADD_SYSTEM_MESSAGE',
+                payload: {
+                  message:
+                    preferences.language === 'es'
+                      ? 'ℹ️ **Git Status**: No hay archivos con cambios pendientes en este repositorio.'
+                      : 'ℹ️ **Git Status**: No pending modified files found in this repository.',
+                },
+              });
+            }
+          }
+          setPrompt('');
+          break;
+        }
+        case 'files':
+          dispatch({ type: 'TOGGLE_SIDEBAR', payload: { isOpen: true } });
+          setSidebarTab('files');
+          setPrompt('');
+          break;
+        case 'sidebar':
+          dispatch({ type: 'TOGGLE_SIDEBAR' });
+          setPrompt('');
+          break;
+        case 'rename': {
+          const newTitle = args.trim();
+          if (!newTitle) {
+            dispatch({
+              type: 'ADD_SYSTEM_MESSAGE',
+              payload: {
+                message:
+                  preferences.language === 'es'
+                    ? '⚠️ Uso: `/rename <nuevo-título>`'
+                    : '⚠️ Usage: `/rename <new-title>`',
+              },
+            });
+          } else if (state.sessionId && state.sessionFile) {
+            const currentSession: SessionSummary = {
+              id: state.sessionId,
+              path: state.sessionFile,
+              firstMessage: '',
+              messageCount: state.messages.length,
+              isActive: true,
+            };
+            void handleRenameSession(currentSession, newTitle);
+            dispatch({
+              type: 'ADD_SYSTEM_MESSAGE',
+              payload: {
+                message:
+                  preferences.language === 'es'
+                    ? `✓ **Sesión renombrada a**: ${newTitle}`
+                    : `✓ **Session renamed to**: ${newTitle}`,
+              },
+            });
+          }
+          setPrompt('');
+          break;
+        }
+        case 'project': {
+          const query = args.trim().toLowerCase();
+          if (!query) {
+            const list = projectsRegistry.projects
+              .map(
+                (p) =>
+                  `• **${getProjectDisplayName(p)}** (\`${p.path}\`)${
+                    p.id === projectsRegistry.activeProjectId ? ' *(Activo / Active)*' : ''
+                  }`
+              )
+              .join('\n');
+            dispatch({
+              type: 'ADD_SYSTEM_MESSAGE',
+              payload: {
+                message:
+                  preferences.language === 'es'
+                    ? `📁 **Proyectos registrados**:\n\n${list}\n\n*Usa \`/project <nombre>\` para cambiar.*`
+                    : `📁 **Registered projects**:\n\n${list}\n\n*Use \`/project <name>\` to switch.*`,
+              },
+            });
+          } else {
+            const matched = projectsRegistry.projects.find((p) => {
+              const name = (p.customName || '').toLowerCase();
+              const folder = (p.path.split(/[/\\]/).pop() || '').toLowerCase();
+              const id = p.id.toLowerCase();
+              return name.includes(query) || folder.includes(query) || id.includes(query);
+            });
+            if (matched) {
+              void handleSelectProjectAndSync(matched);
+              dispatch({
+                type: 'ADD_SYSTEM_MESSAGE',
+                payload: {
+                  message:
+                    preferences.language === 'es'
+                      ? `🔄 **Cambiando a proyecto**: ${getProjectDisplayName(matched)}`
+                      : `🔄 **Switching to project**: ${getProjectDisplayName(matched)}`,
+                },
+              });
+            } else {
+              dispatch({
+                type: 'ADD_SYSTEM_MESSAGE',
+                payload: {
+                  message:
+                    preferences.language === 'es'
+                      ? `⚠️ Proyecto no encontrado para "${args}". Usa \`/project\` para ver la lista.`
+                      : `⚠️ Project not found for "${args}". Use \`/project\` to list available projects.`,
+                },
+              });
+            }
+          }
+          setPrompt('');
+          break;
+        }
+        case 'top':
+          if (chatViewportRef.current) {
+            chatViewportRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+          setPrompt('');
+          break;
+        case 'bottom':
+          handleScrollToBottom();
+          setPrompt('');
+          break;
+        case 'export': {
+          const format = args.trim().toLowerCase() === 'json' ? 'json' : 'md';
+          const activeSession = state.sessions.find(
+            (s) => s.id === state.sessionId || s.path === state.sessionFile
+          );
+          const activeProj = projectsRegistry.projects.find(
+            (p) => p.id === projectsRegistry.activeProjectId
+          );
+          const currentProjectName = activeProj ? getProjectDisplayName(activeProj) : undefined;
+          const activeTitle =
+            activeSession?.customTitle ||
+            activeSession?.firstMessage ||
+            currentProjectName ||
+            'pi-conversation';
+          const filename = generateExportFilename(activeTitle, format);
+          const content =
+            format === 'json'
+              ? exportToJson(state.messages, activeTitle)
+              : exportToMarkdown(state.messages, activeTitle);
+          const mime =
+            format === 'json'
+              ? 'application/json;charset=utf-8'
+              : 'text/markdown;charset=utf-8';
+          const ok = triggerFileDownload(content, filename, mime);
+          dispatch({
+            type: 'ADD_SYSTEM_MESSAGE',
+            payload: {
+              message: ok
+                ? preferences.language === 'es'
+                  ? `📥 **Conversación exportada**: Se descargó el archivo \`${filename}\`.`
+                  : `📥 **Conversation exported**: Downloaded file \`${filename}\`.`
+                : preferences.language === 'es'
+                  ? '⚠️ No se pudo iniciar la descarga en el navegador.'
+                  : '⚠️ Could not trigger file download in browser.',
+            },
+          });
+          setPrompt('');
+          break;
+        }
+        case 'zen':
+          setIsZenMode((prev) => {
+            const next = !prev;
+            dispatch({
+              type: 'ADD_SYSTEM_MESSAGE',
+              payload: {
+                message: next
+                  ? preferences.language === 'es'
+                    ? '🧘 **Modo Zen activado**: Paneles laterales y cabecera ocultos. Presiona `Esc` o ejecuta `/zen` para restaurar.'
+                    : '🧘 **Zen Mode activated**: Sidebars and header hidden. Press `Esc` or run `/zen` to restore.'
+                  : preferences.language === 'es'
+                    ? '🖥️ **Modo Zen desactivado**: Paneles restaurados.'
+                    : '🖥️ **Zen Mode deactivated**: Panels restored.',
+              },
+            });
+            return next;
+          });
+          setPrompt('');
+          break;
+        case 'detach':
+          clearAttachedFiles();
+          dispatch({
+            type: 'ADD_SYSTEM_MESSAGE',
+            payload: {
+              message:
+                preferences.language === 'es'
+                  ? '📎 **Adjuntos eliminados**: El prompt ha quedado sin archivos ni imágenes adjuntas.'
+                  : '📎 **Attachments cleared**: All attached files and images removed from prompt.',
+            },
+          });
+          setPrompt('');
+          break;
+        case 'help':
+          renderHelpGuide();
+          setPrompt('');
+          break;
+        default:
+          break;
+      }
+    },
+    [
+      handleCopyCodeAction,
+      handleInsertCodeAction,
+      handleNewConversation,
+      toggleCompactProcesses,
+      handleRetry,
+      handleOpenSettings,
+      handleSelectProfile,
+      handleThemeChange,
+      preferences.theme,
+      preferences.language,
+      handleSelectThinkingLevel,
+      state.availableModels,
+      state.sessionId,
+      state.sessionFile,
+      state.messages,
+      state.sessions,
+      handleSelectModel,
+      renderHelpGuide,
+      setPrompt,
+      dispatch,
+      config.workingDirectory,
+      openFile,
+      handleRenameSession,
+      projectsRegistry.projects,
+      projectsRegistry.activeProjectId,
+      handleSelectProjectAndSync,
+      clearAttachedFiles,
+      handleScrollToBottom,
+      chatViewportRef,
+    ]
+  );
+
+  const handleSelectCommand = useCallback(
+    (cmd: CommandDefinition) => {
+      if (
+        cmd.id === 'new' ||
+        cmd.id === 'clear' ||
+        cmd.id === 'reload' ||
+        cmd.id === 'settings' ||
+        cmd.id === 'compact' ||
+        cmd.id === 'picolor' ||
+        cmd.id === 'help' ||
+        cmd.id === 'sidebar' ||
+        cmd.id === 'files' ||
+        cmd.id === 'top' ||
+        cmd.id === 'bottom' ||
+        cmd.id === 'zen' ||
+        cmd.id === 'detach'
+      ) {
+        setShowCommandPalette(false);
+        executeClientCommand(cmd, '');
+        return;
+      }
+
+      if (cmd.id === 'cc' && !prompt.includes('all')) {
+        setShowCommandPalette(false);
+        executeClientCommand(cmd, '');
+        return;
+      }
+
+      if (cmd.id === 'export' && !prompt.includes('json') && !prompt.includes('md')) {
+        setShowCommandPalette(false);
+        executeClientCommand(cmd, 'md');
+        return;
+      }
+
+      setPrompt(`${cmd.name} `);
+      setShowCommandPalette(false);
+      const textarea = document.querySelector<HTMLTextAreaElement>('#prompt-input');
+      if (textarea) {
+        textarea.focus();
+      }
+    },
+    [executeClientCommand, prompt, setPrompt]
+  );
+
+  const handleTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showCommandPalette && matchedCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedCommandIndex((prev) => (prev + 1) % matchedCommands.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedCommandIndex((prev) => (prev - 1 + matchedCommands.length) % matchedCommands.length);
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        handleSelectCommand(matchedCommands[selectedCommandIndex]);
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSelectCommand(matchedCommands[selectedCommandIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowCommandPalette(false);
+        return;
+      }
+    }
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      const parsed = parseCommandInput(prompt);
+      if (parsed && parsed.command?.isClientAction) {
+        e.preventDefault();
+        executeClientCommand(parsed.command, parsed.args);
+        return;
+      }
+      if (parsed && parsed.command?.id === 'help') {
+        e.preventDefault();
+        renderHelpGuide();
+        setPrompt('');
+        return;
+      }
+    }
+
+    handleKeyDown(e);
+  };
+
 
   const activeProject = projectsRegistry.projects.find(
     (p) => p.id === projectsRegistry.activeProjectId
@@ -674,7 +1576,37 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className="app-container">
+    <div className={`app-container ${isZenMode ? 'zen-mode' : ''}`}>
+      {preferences.customBackground?.image?.enabled && preferences.customBackground?.image?.url && (
+        <div
+          className="app-custom-background-layer"
+          style={{
+            backgroundImage: `url("${preferences.customBackground.image.url}")`,
+            backgroundSize: preferences.customBackground.image.fit || 'cover',
+            backgroundPosition: preferences.customBackground.image.position || 'center',
+            backgroundRepeat:
+              preferences.customBackground.image.repeat ||
+              preferences.customBackground.image.fit === 'repeat'
+                ? 'repeat'
+                : 'no-repeat',
+            opacity: preferences.customBackground.image.opacity ?? 0.4,
+            filter: preferences.customBackground.image.blur
+              ? `blur(${preferences.customBackground.image.blur}px)`
+              : undefined,
+          }}
+          aria-hidden="true"
+        />
+      )}
+      {isZenMode && (
+        <button
+          type="button"
+          className="btn-exit-zen"
+          onClick={() => setIsZenMode(false)}
+          title={preferences.language === 'es' ? 'Salir de Modo Zen (Esc)' : 'Exit Zen Mode (Esc)'}
+        >
+          ✕ {preferences.language === 'es' ? 'Salir de Modo Zen' : 'Exit Zen Mode'}
+        </button>
+      )}
       <header className="app-header" role="banner">
         <div className="header-brand">
           <button
@@ -721,6 +1653,36 @@ export const App: React.FC = () => {
             <span className="status-label">{localizedStatusLabel}</span>
           </div>
 
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm btn-header-reload"
+            onClick={() => {
+              if (typeof window !== 'undefined' && window.location) {
+                window.location.reload();
+              } else {
+                handleRetry();
+              }
+            }}
+            title={t('header.reload_title')}
+            aria-label={t('header.reload_title')}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+            <span>{t('header.reload')}</span>
+          </button>
+
           {canRetryConnection(state.connectionStatus) && (
             <button
               type="button"
@@ -765,9 +1727,12 @@ export const App: React.FC = () => {
             onSelectSession={handleSelectSession}
             onNewSession={handleNewConversation}
             onDeleteSession={handleDeleteSession}
+            onRenameSession={handleRenameSession}
             onClose={() => dispatch({ type: 'TOGGLE_SIDEBAR', payload: { isOpen: false } })}
             locale={preferences.language}
             filesChangesCount={gitChangesCount}
+            activeTab={sidebarTab}
+            onTabChange={setSidebarTab}
             filesPanel={
               <FileTree
                 key={config.workingDirectory ? normalizeWorkspaceKey(config.workingDirectory) : 'empty'}
@@ -785,12 +1750,16 @@ export const App: React.FC = () => {
         <main className="workspace-main" role="main">
           {showSettings ? (
             <SettingsView
+              initialTab={settingsInitialTab}
               config={config}
               settingsDraft={settingsDraft}
               setSettingsDraft={setSettingsDraft}
               preferences={preferences}
               onThemeChange={handleThemeChange}
               onLanguageChange={handleLanguageChange}
+              onWorkAnimationChange={handleWorkAnimationChange}
+              onCustomThemeColorsChange={handleCustomThemeColorsChange}
+              onCustomBackgroundChange={handleCustomBackgroundChange}
               onNotificationsChange={setNotifications}
               settingsError={settingsError}
               settingsStorageNotice={settingsStorageNotice}
@@ -970,14 +1939,43 @@ export const App: React.FC = () => {
 
         {/* Chat History Viewport */}
         <div className="chat-container">
+          {state.messages.length > 0 && (
+            <div className="chat-toolbar-container">
+              <button
+                type="button"
+                className={`btn-chat-toolbar ${isCompactProcesses ? 'is-active' : ''}`}
+                onClick={toggleCompactProcesses}
+                title={
+                  isCompactProcesses
+                    ? t('process.detailed_processes')
+                    : t('process.compact_processes')
+                }
+              >
+                <span className="toolbar-glyph" aria-hidden="true">
+                  {isCompactProcesses ? '⊟' : '⊞'}
+                </span>
+                <span>
+                  {isCompactProcesses
+                    ? t('process.compacted_processes')
+                    : t('process.compact_processes')}
+                </span>
+              </button>
+            </div>
+          )}
+
           <section
             ref={chatViewportRef}
-            onScroll={handleViewportScroll}
-            className={`chat-viewport ${state.messages.length === 0 ? 'is-empty' : 'has-messages'}`}
+            onScroll={onViewportScroll}
+            className={`chat-viewport ${state.isSwitchingSession || state.messages.length === 0 ? 'is-empty' : 'has-messages'}`}
             aria-label={t('empty.history_label')}
             tabIndex={0}
           >
-          {state.messages.length === 0 ? (
+          {state.isSwitchingSession ? (
+            <div className="empty-state switching-state">
+              <div className="spinner" aria-hidden="true" />
+              <h3 className="empty-state-title">{t('status.switching_session')}</h3>
+            </div>
+          ) : state.messages.length === 0 ? (
             <div className="empty-state">
               <div className="empty-state-icon" aria-hidden="true">
                 <svg
@@ -1039,82 +2037,207 @@ export const App: React.FC = () => {
             </div>
           ) : (
             <ul className="message-list">
-              {state.messages
-                .filter((msg) => !isMessageEmpty(msg))
-                .map((msg) => (
-                <li
-                  key={msg.id}
-                  className={`message-item message-${msg.role}${msg.isCancelled ? ' message-cancelled' : ''}`}
-                >
-                  <div className="message-header">
-                    <span className="message-role">
-                      {msg.role === 'user'
-                        ? t('message.role_user')
-                        : msg.role === 'assistant'
-                          ? t('message.role_assistant')
-                          : t('message.role_system')}
-                    </span>
-                    {msg.isCancelled && (
-                      <span className="message-badge-cancelled">
-                        {t('message.status_cancelled')}
-                      </span>
-                    )}
-                    <span className="message-time">{msg.timestamp}</span>
-                  </div>
-                  <div className={`message-content message-content-${msg.role}`}>
-                    {msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0 ? (
-                      <div className="activity-blocks">
-                        {msg.blocks.map((block, bIndex) => {
-                          if (block.type === 'thinking') {
-                            return (
-                              <ThinkingCard
-                                key={`thinking-${bIndex}`}
-                                block={block}
-                                t={t}
-                              />
-                            );
-                          }
-                          if (block.type === 'tool_call') {
-                            return (
-                              <ToolCard
-                                key={block.id || `tool-${bIndex}`}
-                                block={block}
-                                t={t}
-                              />
-                            );
-                          }
-                          if (block.type === 'text') {
-                            return (
-                              <MarkdownContent
-                                key={`text-${bIndex}`}
-                                content={block.text}
-                                t={t}
-                              />
-                            );
-                          }
-                          return null;
-                        })}
-                      </div>
-                    ) : shouldRenderAsMarkdown(msg.role) ? (
-                      <MarkdownContent content={msg.content} t={t} />
-                    ) : (
-                      <div className="message-literal">{msg.content}</div>
-                    )}
-                    {msg.isStreaming && (
-                      <span
-                        className="streaming-dot"
-                        aria-label={t('message.generating')}
-                      />
-                    )}
-                    {msg.isCancelled && (
-                      <div className="message-cancelled-notice">
-                        <span aria-hidden="true">⏹</span>
-                        <span>{t('message.cancelled_note')}</span>
-                      </div>
-                    )}
+              {hasOlderItems && (
+                <li key="load-older-banner" className="chat-history-load-container">
+                  <div className="chat-history-load-bar">
+                    <button
+                      type="button"
+                      className="btn-load-older-messages"
+                      onClick={handleLoadMoreOlderItems}
+                    >
+                      <span className="load-icon" aria-hidden="true">↑</span>
+                      <span>{t('chat.load_older_messages', { count: hiddenOlderCount })}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-load-all-messages"
+                      onClick={handleLoadAllOlderItems}
+                    >
+                      <span>{t('chat.load_all_messages')}</span>
+                    </button>
                   </div>
                 </li>
-              ))}
+              )}
+              {displayedChatItems.map((item) => {
+                if (item.type === 'process_group') {
+                  return (
+                    <li key={item.id} className="message-item message-process-group">
+                      <ProcessGroupCard group={item} t={t} />
+                    </li>
+                  );
+                }
+
+                const msg = item.message;
+                const processItems = extractProcessItemsFromMessage(msg);
+                const textBlocks = msg.blocks?.filter((b) => b.type === 'text') || [];
+                const interactiveBlocks =
+                  msg.blocks?.filter(
+                    (b): b is ToolCallBlock =>
+                      b.type === 'tool_call' && isInteractiveUserTool(b.name)
+                  ) || [];
+
+                const isPureProcessMessage =
+                  msg.role === 'assistant' &&
+                  interactiveBlocks.length === 0 &&
+                  (!msg.content || msg.content.trim() === '') &&
+                  msg.blocks &&
+                  msg.blocks.length > 0 &&
+                  msg.blocks.every((b) => b.type === 'tool_call' || b.type === 'thinking');
+
+                return (
+                  <li
+                    key={msg.id}
+                    className={`message-item message-${msg.role}${msg.isCancelled ? ' message-cancelled' : ''}${isPureProcessMessage ? ' message-pure-process' : ''}`}
+                  >
+                    {!isPureProcessMessage && (
+                      <div className="message-header">
+                        <span className="message-role">
+                          {msg.role === 'user' ? (
+                            t('message.role_user')
+                          ) : msg.role === 'assistant' ? (
+                            <span className="odd-agent-oval agent-orchestrator" title="Orquestador">
+                              <span className="odd-agent-dot" aria-hidden="true" />
+                              <strong className="odd-agent-name">{t('message.role_assistant')}</strong>
+                            </span>
+                          ) : (
+                            t('message.role_system')
+                          )}
+                        </span>
+                        {msg.isCancelled && (
+                          <span className="message-badge-cancelled">
+                            {t('message.status_cancelled')}
+                          </span>
+                        )}
+                        <span className="message-time">{msg.timestamp}</span>
+                      </div>
+                    )}
+                    <div className={`message-content message-content-${msg.role}`}>
+                      {msg.role === 'assistant' && (processItems.length > 0 || interactiveBlocks.length > 0) ? (
+                        <div className="activity-blocks">
+                          {processItems.length > 0 && (
+                            <ProcessGroupCard
+                              group={createProcessGroup(`proc-sub-${msg.id}`, processItems, msg.timestamp)}
+                              t={t}
+                            />
+                          )}
+                          {interactiveBlocks.map((ib) => (
+                            <InteractiveQuestionCard
+                              key={ib.id || `interactive-${ib.name}`}
+                              block={ib}
+                              onSelectOption={handleSelectInteractiveOption}
+                              t={t}
+                            />
+                          ))}
+                          {textBlocks.length > 0 ? (
+                            textBlocks.map((tb, idx) => (
+                              <MarkdownContent
+                                key={`text-${idx}`}
+                                content={tb.text}
+                                onInsertPrompt={insertCodeIntoPrompt}
+                                t={t}
+                              />
+                            ))
+                          ) : msg.content ? (
+                            <MarkdownContent
+                              content={msg.content}
+                              onInsertPrompt={insertCodeIntoPrompt}
+                              t={t}
+                            />
+                          ) : null}
+                        </div>
+                      ) : msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0 ? (
+                        <div className="activity-blocks">
+                          {msg.blocks.map((block, bIndex) => {
+                            if (block.type === 'thinking') {
+                              return (
+                                <ThinkingCard
+                                  key={`thinking-${bIndex}`}
+                                  block={block}
+                                  t={t}
+                                />
+                              );
+                            }
+                            if (block.type === 'tool_call') {
+                              if (isInteractiveUserTool(block.name)) {
+                                return (
+                                  <InteractiveQuestionCard
+                                    key={block.id || `interactive-${bIndex}`}
+                                    block={block}
+                                    onSelectOption={handleSelectInteractiveOption}
+                                    t={t}
+                                  />
+                                );
+                              }
+                              return (
+                                <ToolCard
+                                  key={block.id || `tool-${bIndex}`}
+                                  block={block}
+                                  t={t}
+                                />
+                              );
+                            }
+                            if (block.type === 'text') {
+                              return (
+                                <MarkdownContent
+                                  key={`text-${bIndex}`}
+                                  content={block.text}
+                                  onInsertPrompt={insertCodeIntoPrompt}
+                                  t={t}
+                                />
+                              );
+                            }
+                            return null;
+                          })}
+                          {textBlocks.length === 0 && msg.content && (
+                            <MarkdownContent
+                              content={msg.content}
+                              onInsertPrompt={insertCodeIntoPrompt}
+                              t={t}
+                            />
+                          )}
+                        </div>
+                      ) : shouldRenderAsMarkdown(msg.role) ? (
+                        <MarkdownContent
+                          content={msg.content}
+                          onInsertPrompt={insertCodeIntoPrompt}
+                          t={t}
+                        />
+                      ) : (
+                        <UserMessageContent content={msg.content} />
+                      )}
+                      {msg.images && msg.images.length > 0 && (
+                        <div className="message-images-grid">
+                          {msg.images.map((imgSrc, imgIdx) => (
+                            <a
+                              key={`msg-img-${imgIdx}`}
+                              href={imgSrc}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="message-image-wrap"
+                              onClick={(e) => handleOpenImageInNewTab(e, imgSrc)}
+                              title={preferences.language === 'es' ? 'Abrir imagen en una pestaña nueva' : 'Open image in new tab'}
+                            >
+                              <img src={imgSrc} alt={`Attachment ${imgIdx + 1}`} className="message-image-thumb" />
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      {msg.isStreaming && (
+                        <span
+                          className="streaming-dot"
+                          aria-label={t('message.generating')}
+                        />
+                      )}
+                      {msg.isCancelled && (
+                        <div className="message-cancelled-notice">
+                          <span aria-hidden="true">⏹</span>
+                          <span>{t('message.cancelled_note')}</span>
+                        </div>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
               <li className="scroll-anchor" aria-hidden="true" />
             </ul>
           )}
@@ -1158,13 +2281,33 @@ export const App: React.FC = () => {
                 <label htmlFor="prompt-input" className="prompt-label">
                   {t('prompt.label')}
                 </label>
-                <span
-                  className={`prompt-status-dot status-${state.connectionStatus} ${isBusy ? 'is-busy' : ''}`}
-                  title={localizedStatusDetail || localizedStatusLabel}
-                  aria-label={t('prompt.status_dot_aria', { status: localizedStatusLabel })}
-                />
+                {isBusy ? (
+                  <section
+                    className={workAnimStyles.className}
+                    style={workAnimStyles.style as React.CSSProperties}
+                    aria-live="polite"
+                  >
+                    <div className="loader" aria-hidden="true">
+                      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (
+                        <div key={`dot-l-${i}`} className="dot" style={{ '--i': i } as React.CSSProperties} />
+                      ))}
+                    </div>
+                    <h2>Working</h2>
+                    <div className="loader" aria-hidden="true">
+                      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (
+                        <div key={`dot-r-${i}`} className="dot" style={{ '--i': i } as React.CSSProperties} />
+                      ))}
+                    </div>
+                  </section>
+                ) : (
+                  <span
+                    className={`prompt-status-dot status-${state.connectionStatus}`}
+                    title={localizedStatusDetail || localizedStatusLabel}
+                    aria-label={t('prompt.status_dot_aria', { status: localizedStatusLabel })}
+                  />
+                )}
               </div>
-              <span id="prompt-status-hint" className="prompt-hint">
+              <span id="prompt-status-hint" className={`prompt-hint ${isBusy ? 'is-busy' : ''}`}>
                 {isBusy
                   ? t('prompt.hint_busy')
                   : state.isResetting
@@ -1195,7 +2338,14 @@ export const App: React.FC = () => {
                         <circle cx="18" cy="16" r="3" />
                       </svg>
                     ) : file.type === 'image' && file.previewUrl ? (
-                      <img src={file.previewUrl} alt={file.name} className="attachment-thumb" />
+                      <img
+                        src={file.previewUrl}
+                        alt={file.name}
+                        className="attachment-thumb"
+                        onClick={(e) => file.previewUrl && handleOpenImageInNewTab(e, file.previewUrl)}
+                        style={{ cursor: 'pointer' }}
+                        title={preferences.language === 'es' ? 'Abrir imagen en una pestaña nueva' : 'Open image in new tab'}
+                      />
                     ) : (
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
@@ -1217,33 +2367,82 @@ export const App: React.FC = () => {
               </div>
             )}
 
-            <textarea
-              id="prompt-input"
-              name="prompt"
-              className={`prompt-textarea ${isHighContext ? 'context-pulse-red' : ''}`}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                isConnecting
-                  ? t('prompt.placeholder_connecting')
-                  : state.isResetting
-                    ? t('prompt.placeholder_resetting')
-                    : !state.isHydrated && isConnected
-                      ? t('prompt.placeholder_hydrating')
-                      : state.connectionStatus === 'error'
-                        ? t('prompt.placeholder_error')
-                        : !isConnected
-                          ? t('prompt.placeholder_offline')
-                          : isBusy
-                            ? t('prompt.placeholder_busy')
-                            : t('prompt.placeholder_ready')
-              }
-              disabled={!isReadyToSend}
-              aria-disabled={!isReadyToSend}
-              aria-describedby="prompt-status-hint"
-              rows={3}
-            />
+            <div className="command-palette-wrapper">
+              {showCommandPalette && matchedCommands.length > 0 && (
+                <CommandPalettePopover
+                  commands={matchedCommands}
+                  selectedIndex={selectedCommandIndex}
+                  onSelectCommand={handleSelectCommand}
+                  locale={preferences.language}
+                />
+              )}
+
+              <textarea
+                id="prompt-input"
+                name="prompt"
+                className={`prompt-textarea ${isHighContext ? 'context-pulse-red' : ''}`}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={handleTextareaKeyDown}
+                onPaste={async (e) => {
+                  const items = e.clipboardData?.items;
+                  if (!items) return;
+
+                  const imageFiles: File[] = [];
+                  for (let i = 0; i < items.length; i++) {
+                    const item = items[i];
+                    if (item.type.startsWith('image/')) {
+                      const file = item.getAsFile();
+                      if (file) imageFiles.push(file);
+                    }
+                  }
+
+                  if (imageFiles.length > 0) {
+                    e.preventDefault();
+                    for (const file of imageFiles) {
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        const dataUrl = reader.result as string;
+                        const base64Data = dataUrl.split(',')[1] || '';
+                        addAttachedFiles([
+                          {
+                            id: `paste-img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                            name: file.name || `image-${Date.now()}.png`,
+                            size: file.size,
+                            type: 'image',
+                            mimeType: file.type || 'image/png',
+                            data: base64Data,
+                            previewUrl: dataUrl,
+                          },
+                        ]);
+                      };
+                      reader.readAsDataURL(file);
+                    }
+                  }
+                }}
+                placeholder={
+                  isConnecting
+                    ? t('prompt.placeholder_connecting')
+                    : state.isResetting
+                      ? t('prompt.placeholder_resetting')
+                      : !state.isHydrated && isConnected
+                        ? t('prompt.placeholder_hydrating')
+                        : state.connectionStatus === 'error'
+                          ? t('prompt.placeholder_error')
+                          : !isConnected
+                            ? t('prompt.placeholder_offline')
+                            : isBusy
+                              ? (preferences.language === 'es'
+                                  ? 'Escriba un mensaje para encolar... (Enter para enviar a la cola)'
+                                  : 'Type a message to queue... (Enter to queue)')
+                              : t('prompt.placeholder_ready')
+                }
+                disabled={!isReadyToInput}
+                aria-disabled={!isReadyToInput}
+                aria-describedby="prompt-status-hint"
+                rows={3}
+              />
+            </div>
 
             <PromptControls
               modelInfo={state.modelInfo}
@@ -1256,7 +2455,7 @@ export const App: React.FC = () => {
               isHighContext={isHighContext}
               isConnected={isConnected}
               isBusy={isBusy}
-              canSend={isReadyToSend && (prompt.trim().length > 0 || attachedFiles.length > 0)}
+              canSend={isReadyToInput && (prompt.trim().length > 0 || attachedFiles.length > 0)}
               attachedFiles={attachedFiles}
               onAttachFiles={addAttachedFiles}
               onAbort={handleAbort}
@@ -1276,6 +2475,7 @@ export const App: React.FC = () => {
               onCheckCloudStatus={checkCloudStatus}
               isEnrolling={isEnrolling}
               onEnrollProject={enrollProject}
+              engramObservations={engramObservations}
               profiles={profilesHook.profiles}
               activeProfileName={profilesHook.effectiveActiveProfile}
               effectiveScope={profilesHook.effectiveScope}
@@ -1299,6 +2499,7 @@ export const App: React.FC = () => {
           workingDirectory={config.workingDirectory}
           onClose={closeFile}
           locale={preferences.language}
+          initialTab={fileViewerInitialTab}
         />
       )}
 
@@ -1311,6 +2512,7 @@ export const App: React.FC = () => {
           error={profilesHook.modalError}
           availableModels={profilesHook.availableModels}
           categories={profilesHook.categories}
+          agentMeta={profilesHook.agentMeta}
           cwd={config.workingDirectory}
           onClose={profilesHook.closeModal}
           onChangeField={profilesHook.updateFormField}

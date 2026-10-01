@@ -1,4 +1,5 @@
 import {
+  extractImagesFromContent,
   extractTextFromContent,
   extractToolOutput,
   parseMessageBlocks,
@@ -341,6 +342,7 @@ export function convertRpcMessageToChatMessage(
   }
 
   const text = extractTextFromContent(msg.content);
+  const images = extractImagesFromContent(msg.content);
   const timestamp =
     typeof msg.timestamp === 'number'
       ? new Date(msg.timestamp).toLocaleTimeString()
@@ -360,6 +362,7 @@ export function convertRpcMessageToChatMessage(
     timestamp,
     isStreaming: false,
     blocks: blocks && blocks.length > 0 ? blocks : undefined,
+    images: images && images.length > 0 ? images : undefined,
   };
 }
 
@@ -373,27 +376,38 @@ export function hydrateChatMessages(rawMessages: unknown[]): ChatMessage[] {
   }
 
   const hydrated: ChatMessage[] = [];
+  const toolCallMap = new Map<string, ToolCallBlock>();
+
   for (let i = 0; i < rawMessages.length; i++) {
     const raw = rawMessages[i];
     if (raw && typeof raw === 'object') {
       const rawObj = raw as Record<string, unknown>;
 
-      // Match historical toolResult to preceding assistant toolCall block
+      // Match historical toolResult to preceding assistant toolCall block in O(1)
       if (rawObj.role === 'toolResult') {
         const toolCallId =
           typeof rawObj.toolCallId === 'string' ? rawObj.toolCallId : undefined;
         if (toolCallId) {
-          for (let j = hydrated.length - 1; j >= 0; j--) {
-            const prevMsg = hydrated[j];
-            if (prevMsg.blocks) {
-              const toolBlock = prevMsg.blocks.find(
-                (b): b is ToolCallBlock => b.type === 'tool_call' && b.id === toolCallId
-              );
-              if (toolBlock) {
-                toolBlock.status = rawObj.isError ? 'error' : 'completed';
-                toolBlock.isError = Boolean(rawObj.isError);
-                toolBlock.output = extractToolOutput(rawObj.content ?? rawObj.result);
-                break;
+          const toolBlock = toolCallMap.get(toolCallId);
+          if (toolBlock) {
+            toolBlock.status = rawObj.isError ? 'error' : 'completed';
+            toolBlock.isError = Boolean(rawObj.isError);
+            toolBlock.output = extractToolOutput(rawObj.content ?? rawObj.result);
+          } else {
+            // Fallback backward search if needed
+            for (let j = hydrated.length - 1; j >= 0; j--) {
+              const prevMsg = hydrated[j];
+              if (prevMsg.blocks) {
+                const fallbackBlock = prevMsg.blocks.find(
+                  (b): b is ToolCallBlock => b.type === 'tool_call' && b.id === toolCallId
+                );
+                if (fallbackBlock) {
+                  fallbackBlock.status = rawObj.isError ? 'error' : 'completed';
+                  fallbackBlock.isError = Boolean(rawObj.isError);
+                  fallbackBlock.output = extractToolOutput(rawObj.content ?? rawObj.result);
+                  toolCallMap.set(toolCallId, fallbackBlock);
+                  break;
+                }
               }
             }
           }
@@ -408,6 +422,13 @@ export function hydrateChatMessages(rawMessages: unknown[]): ChatMessage[] {
           (converted.blocks && converted.blocks.length > 0) ||
           converted.role === 'assistant')
       ) {
+        if (converted.blocks) {
+          for (const block of converted.blocks) {
+            if (block.type === 'tool_call' && block.id) {
+              toolCallMap.set(block.id, block);
+            }
+          }
+        }
         hydrated.push(converted);
       }
     }
@@ -415,3 +436,55 @@ export function hydrateChatMessages(rawMessages: unknown[]): ChatMessage[] {
 
   return hydrated;
 }
+
+/** Key in localStorage for user-renamed session titles */
+export const PI_VIEWER_SESSION_TITLES_STORAGE_KEY = 'pi_viewer_session_titles';
+
+/**
+ * Loads all user-renamed session titles from localStorage.
+ */
+export function loadSessionTitles(storage?: Storage | null): Record<string, string> {
+  const store = getStorage(storage);
+  if (!store) return {};
+  try {
+    const raw = store.getItem(PI_VIEWER_SESSION_TITLES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, string>;
+    }
+  } catch {}
+  return {};
+}
+
+/**
+ * Persists or updates a session's custom title in localStorage.
+ */
+export function saveSessionTitle(
+  sessionId: string,
+  title: string,
+  storage?: Storage | null
+): { success: boolean; error?: string } {
+  if (!sessionId || !sessionId.trim()) {
+    return { success: false, error: 'Session ID is required' };
+  }
+  const cleanTitle = title.trim();
+  const store = getStorage(storage);
+  if (!store) {
+    return { success: false, error: 'Storage unavailable' };
+  }
+  const titles = loadSessionTitles(storage);
+  if (!cleanTitle) {
+    delete titles[sessionId];
+  } else {
+    titles[sessionId] = cleanTitle;
+  }
+  try {
+    store.setItem(PI_VIEWER_SESSION_TITLES_STORAGE_KEY, JSON.stringify(titles));
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: `Failed to persist session title: ${msg}` };
+  }
+}
+

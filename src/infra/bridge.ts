@@ -199,10 +199,16 @@ export interface SendPromptPayload {
   id: string;
   message: string;
   images?: PromptImageAttachment[];
+  streamingBehavior?: 'followUp' | 'steer';
 }
 
 export interface SendPromptArgs {
   payload: SendPromptPayload;
+}
+
+export interface SendPromptOptions {
+  images?: PromptImageAttachment[];
+  streamingBehavior?: 'followUp' | 'steer';
 }
 
 /**
@@ -212,13 +218,15 @@ export interface SendPromptArgs {
 export function buildSendPromptArgs(
   id: string,
   message: string,
-  images?: PromptImageAttachment[]
+  images?: PromptImageAttachment[],
+  streamingBehavior?: 'followUp' | 'steer'
 ): SendPromptArgs {
   return {
     payload: {
       id,
       message,
       ...(images && images.length > 0 ? { images } : {}),
+      ...(streamingBehavior ? { streamingBehavior } : {}),
     },
   };
 }
@@ -231,19 +239,26 @@ export function buildSendPromptArgs(
 export async function sendPromptPi(
   id: string,
   message: string,
-  imagesOrInvokeFn?:
+  imagesOrOptionsOrInvokeFn?:
     | PromptImageAttachment[]
+    | SendPromptOptions
     | (<T>(cmd: string, args?: Record<string, unknown>) => Promise<T>),
   invokeFnParam?: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
 ): Promise<SendPromptResult> {
   let images: PromptImageAttachment[] | undefined;
+  let streamingBehavior: 'followUp' | 'steer' | undefined;
   let invokeFn: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> = invoke;
 
-  if (typeof imagesOrInvokeFn === 'function') {
-    invokeFn = imagesOrInvokeFn;
-    images = undefined;
-  } else {
-    images = imagesOrInvokeFn;
+  if (typeof imagesOrOptionsOrInvokeFn === 'function') {
+    invokeFn = imagesOrOptionsOrInvokeFn;
+  } else if (Array.isArray(imagesOrOptionsOrInvokeFn)) {
+    images = imagesOrOptionsOrInvokeFn;
+    if (invokeFnParam) {
+      invokeFn = invokeFnParam;
+    }
+  } else if (imagesOrOptionsOrInvokeFn && typeof imagesOrOptionsOrInvokeFn === 'object') {
+    images = imagesOrOptionsOrInvokeFn.images;
+    streamingBehavior = imagesOrOptionsOrInvokeFn.streamingBehavior;
     if (invokeFnParam) {
       invokeFn = invokeFnParam;
     }
@@ -253,7 +268,7 @@ export async function sendPromptPi(
     throw new Error('Desktop runtime unavailable: cannot send prompt outside Tauri');
   }
 
-  const args = buildSendPromptArgs(id, message, images);
+  const args = buildSendPromptArgs(id, message, images, streamingBehavior);
   const result = await invokeFn<SendPromptResult>(
     'send_prompt',
     args as unknown as Record<string, unknown>
@@ -386,6 +401,25 @@ export async function deleteSessionPi(
 
   return await invokeFn<DeleteSessionResult>('delete_session', {
     payload: { sessionPath },
+  });
+}
+
+/**
+ * Rename/retag a session file with a custom title via Tauri IPC.
+ */
+export async function renameSessionPi(
+  sessionPath: string,
+  newTitle: string,
+  invokeFn: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> = invoke
+): Promise<{ success: boolean }> {
+  if (!isTauri() && invokeFn === invoke) {
+    return { success: true };
+  }
+
+  return await invokeFn<{ success: boolean }>('rename_session', {
+    payload: { sessionPath, newTitle },
+    sessionPath,
+    newTitle,
   });
 }
 
@@ -820,6 +854,59 @@ export async function pickDirectoryPi(
   } catch {
     return null;
   }
+}
+
+export interface BrowseFolderItem {
+  name: string;
+  fullPath: string;
+  windowsPath?: string;
+}
+
+export interface BrowseShortcutItem {
+  name: string;
+  path: string;
+  windowsPath?: string;
+}
+
+export interface BrowseFilesystemResult {
+  currentPath: string;
+  windowsPath: string | null;
+  parentPath: string | null;
+  folders: BrowseFolderItem[];
+  shortcuts: BrowseShortcutItem[];
+  error?: string;
+}
+
+/**
+ * Browse filesystem directories across local and mapped network paths (e.g. Z:\).
+ * Returns folders, parent path, and convenient shortcuts.
+ */
+export async function browseFilesystemPi(
+  targetPath?: string,
+  invokeFn: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> = invoke
+): Promise<BrowseFilesystemResult> {
+  try {
+    const result = await invokeFn<BrowseFilesystemResult>('browse_filesystem', {
+      payload: { path: targetPath || '' },
+    });
+    if (result && typeof result === 'object') {
+      return result;
+    }
+  } catch (err) {
+    console.warn('[browseFilesystemPi error]:', err);
+  }
+
+  return {
+    currentPath: targetPath || '/home/hermes/Desarrollos',
+    windowsPath: null,
+    parentPath: null,
+    folders: [],
+    shortcuts: [
+      { name: 'Desarrollos (Z:\\)', path: '/home/hermes/Desarrollos', windowsPath: 'Z:\\' },
+      { name: 'Prueba (Z:\\Prueba)', path: '/home/hermes/Desarrollos/Prueba', windowsPath: 'Z:\\Prueba' },
+      { name: 'Home (/home/hermes)', path: '/home/hermes' },
+    ],
+  };
 }
 
 export const MOCK_MCP_SERVERS_STORAGE_KEY = 'pi_viewer_mcp_servers_mock';
@@ -2070,6 +2157,66 @@ export async function enrollEngramProjectPi(
     return Boolean(res);
   } catch {
     return false;
+  }
+}
+
+export interface EngramObservation {
+  id: number;
+  title: string;
+  type: string;
+  content: string;
+  project?: string;
+  scope?: string;
+  created_at?: string;
+}
+
+/**
+ * Retrieve recent Engram observations for a project via Tauri IPC.
+ */
+export async function getEngramObservationsPi(
+  project?: string,
+  limit = 20,
+  invokeFn: InvokeFn = defaultInvoke
+): Promise<EngramObservation[]> {
+  if (!isTauri() && invokeFn === defaultInvoke) {
+    return [];
+  }
+  try {
+    const res = await invokeFn<EngramObservation[]>('get_engram_observations', { project, limit });
+    return res ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export interface PiChainStep {
+  name: string;
+  output?: string;
+  reads?: string;
+  description?: string;
+}
+
+export interface PiChain {
+  name: string;
+  description: string;
+  path: string;
+  steps: PiChainStep[];
+}
+
+/**
+ * Retrieve discovered Pi chains from ~/.pi/agent/chains/ and gentle-pi assets via Tauri IPC.
+ */
+export async function getPiChainsPi(
+  invokeFn: InvokeFn = defaultInvoke
+): Promise<PiChain[]> {
+  if (!isTauri() && invokeFn === defaultInvoke) {
+    return [];
+  }
+  try {
+    const res = await invokeFn<PiChain[]>('get_pi_chains');
+    return res ?? [];
+  } catch {
+    return [];
   }
 }
 

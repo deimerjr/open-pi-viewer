@@ -23,6 +23,8 @@ pub struct SessionSummary {
     pub created_at: Option<String>,
     pub modified_at: Option<String>,
     pub first_message: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub custom_title: Option<String>,
     pub message_count: usize,
     pub is_active: bool,
 }
@@ -288,6 +290,7 @@ pub fn parse_session_file(
 
     let mut message_count: usize = 0;
     let mut first_user_message: Option<String> = None;
+    let mut custom_title: Option<String> = None;
 
     for line_res in lines {
         let line = match line_res {
@@ -302,6 +305,17 @@ pub fn parse_session_file(
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        if val.get("type").and_then(|v| v.as_str()) == Some("session_info") {
+            if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
+                let trimmed_n = n.trim();
+                custom_title = if trimmed_n.is_empty() {
+                    None
+                } else {
+                    Some(trimmed_n.to_string())
+                };
+            }
+        }
 
         if val.get("type").and_then(|v| v.as_str()) == Some("message") {
             message_count += 1;
@@ -373,6 +387,7 @@ pub fn parse_session_file(
         created_at,
         modified_at,
         first_message,
+        custom_title,
         message_count,
         is_active,
     })
@@ -556,6 +571,7 @@ pub async fn list_sessions(
                     created_at: system_time_to_rfc3339(std::time::SystemTime::now()),
                     modified_at: system_time_to_rfc3339(std::time::SystemTime::now()),
                     first_message: "(no messages)".to_string(),
+                    custom_title: None,
                     message_count: 0,
                     is_active: true,
                 },
@@ -934,6 +950,104 @@ pub async fn delete_session(
     })
 }
 
+/// Payload for renaming a session
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameSessionPayload {
+    pub session_path: String,
+    pub new_title: String,
+}
+
+/// Rename/retag a conversation session by appending native Pi session_info entry
+#[tauri::command]
+pub async fn rename_session(
+    payload: RenameSessionPayload,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let valid_path = validate_switch_session_path(&payload.session_path)?;
+    let clean_title = payload.new_title.trim();
+    if clean_title.is_empty() {
+        return Err("Session title cannot be empty".to_string());
+    }
+
+    // 1. If currently active in Pi RPC session, notify Pi CLI subprocess
+    if let Ok(session) = state.get_session().await {
+        if session.is_alive() {
+            let cur_file = session.current_session_file.lock().await.clone();
+            let matches_active = if let Some(ref cf) = cur_file {
+                let cf_path = Path::new(cf);
+                if let Ok(can_cf) = dunce::canonicalize(cf_path) {
+                    can_cf == valid_path
+                } else {
+                    cf_path == valid_path
+                }
+            } else {
+                false
+            };
+            if matches_active {
+                let req_id = crate::process::next_request_id("set-session-name");
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                {
+                    let mut pend = session.pending_responses.lock().await;
+                    pend.insert(req_id.clone(), tx);
+                }
+                let cmd = serde_json::json!({
+                    "id": req_id,
+                    "type": "set_session_name",
+                    "name": clean_title,
+                });
+                let _ = session.stdin_tx.send(cmd.to_string()).await;
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+            }
+        }
+    }
+
+    // 2. Read parentId from last line of session file
+    let mut parent_id = None;
+    if let Ok(content) = std::fs::read_to_string(&valid_path) {
+        for line in content.lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<Value>(trimmed) {
+                if let Some(id_str) = entry.get("id").and_then(|i| i.as_str()) {
+                    parent_id = Some(id_str.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let short_id = format!("{:08x}", nanos as u32);
+    let iso = system_time_to_rfc3339(std::time::SystemTime::now())
+        .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string());
+
+    let session_info_entry = serde_json::json!({
+        "type": "session_info",
+        "id": short_id,
+        "parentId": parent_id,
+        "timestamp": iso,
+        "name": clean_title,
+    });
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(&valid_path)
+        .map_err(|e| format!("Failed to open session file: {e}"))?;
+
+    writeln!(file, "{}", session_info_entry)
+        .map_err(|e| format!("Failed to append session_info entry: {e}"))?;
+
+    Ok(serde_json::json!({ "success": true }))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1077,6 +1191,22 @@ mod tests {
         let non_jsonl_path = temp_path.join("session.txt");
         std::fs::write(&non_jsonl_path, "{\"type\":\"session\",\"id\":\"txt\"}\n").unwrap();
 
+        std::thread::sleep(Duration::from_millis(50));
+
+        // 8. sess5: Valid session with custom session_info title
+        let sess5_path = temp_path.join("2026-09-05_sess5.jsonl");
+        let sess5_content = "\
+{\"type\":\"session\",\"id\":\"sess-5\",\"timestamp\":\"2026-09-05T10:00:00.000Z\"}\n\
+{\"type\":\"session_info\",\"id\":\"abc12345\",\"name\":\"Renamed Custom Title\"}\n\
+{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"Hello world\"}}\n";
+        std::fs::write(&sess5_path, sess5_content).unwrap();
+
+        // Test parse_session_file on sess5
+        let summary5 = parse_session_file(&sess5_path, None, None);
+        assert!(summary5.is_some());
+        let s5 = summary5.unwrap();
+        assert_eq!(s5.custom_title, Some("Renamed Custom Title".to_string()));
+
         // Test parse_session_file on sess1
         let summary1 = parse_session_file(&sess1_path, Some("sess-1"), None);
         assert!(summary1.is_some());
@@ -1121,20 +1251,23 @@ mod tests {
 
         // Test list_sessions_from_dir
         let listing = list_sessions_from_dir(&temp_path, Some("sess-2"), None);
-        // Only 4 valid sessions
-        assert_eq!(listing.len(), 4);
+        // 5 valid sessions
+        assert_eq!(listing.len(), 5);
 
-        // Verify sorted by modified_at descending: newest (sess4) to oldest (sess1)
-        assert_eq!(listing[0].id, "sess-4");
-        assert_eq!(listing[1].id, "sess-3");
-        assert_eq!(listing[2].id, "sess-2");
-        assert_eq!(listing[3].id, "sess-1");
+        // Verify sorted by modified_at descending: newest (sess5) to oldest (sess1)
+        assert_eq!(listing[0].id, "sess-5");
+        assert_eq!(listing[0].custom_title, Some("Renamed Custom Title".to_string()));
+        assert_eq!(listing[1].id, "sess-4");
+        assert_eq!(listing[2].id, "sess-3");
+        assert_eq!(listing[3].id, "sess-2");
+        assert_eq!(listing[4].id, "sess-1");
 
         // Verify active flag propagated
-        assert!(listing[2].is_active);
+        assert!(listing[3].is_active);
         assert!(!listing[0].is_active);
         assert!(!listing[1].is_active);
-        assert!(!listing[3].is_active);
+        assert!(!listing[2].is_active);
+        assert!(!listing[4].is_active);
     }
 
     #[test]
@@ -1192,6 +1325,7 @@ mod tests {
             created_at: Some("2026-09-15T12:00:00.000Z".to_string()),
             modified_at: Some("2026-09-15T12:30:00.000Z".to_string()),
             first_message: "Hello world".to_string(),
+            custom_title: None,
             message_count: 5,
             is_active: true,
         };

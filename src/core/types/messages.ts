@@ -33,4 +33,5 @@ export interface ChatMessage {
   isStreaming?: boolean;
   isCancelled?: boolean;
   blocks?: MessageBlock[];
+  images?: string[]; // data URLs or image preview sources
 }

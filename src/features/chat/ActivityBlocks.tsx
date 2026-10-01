@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import type { TranslationKey } from '@shared/i18n';
 import type { ThinkingBlock, ToolCallBlock } from '@core/types/messages';
+import { detectLanguageFromPath, highlightCode } from '@core/picolor';
+import { getLanguageIcon } from './MarkdownContent';
 
 export interface ActivityBlocksProps {
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
@@ -12,6 +14,25 @@ export interface ThinkingCardProps extends ActivityBlocksProps {
 
 export interface ToolCardProps extends ActivityBlocksProps {
   block: ToolCallBlock;
+}
+
+/**
+ * Safely parses arguments as an object or null.
+ */
+export function parseArgsObject(args: unknown): Record<string, unknown> | null {
+  if (!args) return null;
+  if (typeof args === 'object' && !Array.isArray(args)) {
+    return args as Record<string, unknown>;
+  }
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 /**
@@ -27,6 +48,13 @@ export function formatToolPrimaryArg(name: string, args: unknown): string | null
 
   if (name === 'read' && typeof obj.path === 'string') {
     return obj.path;
+  }
+  // Subagent execution: extract agent name or task label
+  if (name.startsWith('subagent') || name === 'agent') {
+    if (typeof obj.agent === 'string') {
+      const taskLabel = typeof obj.label === 'string' ? obj.label : typeof obj.task === 'string' ? obj.task.slice(0, 40) : '';
+      return taskLabel ? `${obj.agent} · ${taskLabel}` : obj.agent;
+    }
   }
   if (name === 'grep') {
     if (typeof obj.pattern === 'string' && typeof obj.path === 'string') {
@@ -87,7 +115,7 @@ export function formatToolFullArgs(args: unknown): string {
  * Collapsible Thinking Accordion component.
  * Expanded while streaming, collapsed by default when complete.
  */
-export const ThinkingCard: React.FC<ThinkingCardProps> = ({ block, t }) => {
+export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(({ block, t }) => {
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
 
   // If streaming and user hasn't toggled, expand by default; collapse when done
@@ -147,7 +175,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = ({ block, t }) => {
       )}
     </div>
   );
-};
+});
 
 /**
  * Render appropriate icon for a given tool name.
@@ -210,7 +238,7 @@ export function ToolIcon({ name }: { name: string }) {
  * Collapsible Tool Execution Card.
  * Displays tool name, primary argument badge, status pill, and expandable output with copy button.
  */
-export const ToolCard: React.FC<ToolCardProps> = ({ block, t }) => {
+export const ToolCard: React.FC<ToolCardProps> = React.memo(({ block, t }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
@@ -269,7 +297,10 @@ export const ToolCard: React.FC<ToolCardProps> = ({ block, t }) => {
           </span>
           <span className="tool-name">{block.name}</span>
           {primaryArg && (
-            <span className="tool-arg-badge" title={primaryArg}>
+            <span
+              className={`tool-arg-badge ${block.name.startsWith('subagent') || block.name === 'agent' ? 'tool-arg-badge-agent' : ''}`}
+              title={primaryArg}
+            >
               {primaryArg}
             </span>
           )}
@@ -298,60 +329,220 @@ export const ToolCard: React.FC<ToolCardProps> = ({ block, t }) => {
 
       {isOpen && (
         <div className="tool-card-body" role="region" aria-label={`${block.name} ${t('activity.output')}`}>
-          {fullArgs && (
-            <div className="tool-section tool-section-args">
-              <span className="tool-section-label">{t('activity.arguments')}</span>
-              <pre className="tool-args-pre">{fullArgs}</pre>
-            </div>
-          )}
+          {(() => {
+            const parsedArgs = parseArgsObject(block.args);
+            const toolName = block.name.toLowerCase();
 
-          <div className="tool-section tool-section-output">
-            <div className="tool-output-header">
-              <span className="tool-section-label">{t('activity.output')}</span>
-              {(output.length > 0 || fullArgs.length > 0) && (
-                <button
-                  type="button"
-                  className="tool-copy-btn"
-                  onClick={handleCopyOutput}
-                  aria-label={t('activity.copy_output')}
-                >
-                  {copyFeedback ? (
-                    <span className="tool-copied-text">{copyFeedback}</span>
-                  ) : (
-                    <>
-                      <svg
-                        viewBox="0 0 16 16"
-                        width="12"
-                        height="12"
-                        fill="currentColor"
-                        aria-hidden="true"
+            // 1. Specialized formatted view for "write" (Decodes and syntax-highlights source code)
+            if (toolName === 'write' && parsedArgs && typeof parsedArgs.content === 'string') {
+              const filePath = typeof parsedArgs.path === 'string' ? parsedArgs.path : '';
+              const lang = detectLanguageFromPath(filePath) || 'typescript';
+              const icon = getLanguageIcon(lang);
+              const content = parsedArgs.content;
+              const lineCount = content.split('\n').length;
+              const highlightedContent = highlightCode(content, lang, 'picolor');
+
+              return (
+                <div className="tool-section tool-section-code">
+                  <div className="tool-code-header">
+                    <div className="tool-code-header-left">
+                      <span className="tool-code-icon" aria-hidden="true">{icon}</span>
+                      <span className="tool-code-path">{filePath || 'archivo'}</span>
+                      {lang && <span className="tool-code-lang-badge">{lang}</span>}
+                      <span className="tool-code-lines">{lineCount} {lineCount === 1 ? 'línea' : 'líneas'}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="tool-copy-btn"
+                      onClick={() => void handleCopyOutput({ stopPropagation: () => {} } as any)}
+                      aria-label={t('activity.copy_output')}
+                    >
+                      {copyFeedback ? (
+                        <span className="tool-copied-text">{copyFeedback}</span>
+                      ) : (
+                        <span>{t('activity.copy_output')}</span>
+                      )}
+                    </button>
+                  </div>
+                  <div className="tool-code-container">
+                    <pre className="tool-code-pre">
+                      <code dangerouslySetInnerHTML={{ __html: highlightedContent }} />
+                    </pre>
+                  </div>
+                </div>
+              );
+            }
+
+            // 2. Specialized formatted view for "edit" (Shows oldText / newText diff blocks)
+            if (toolName === 'edit' && parsedArgs) {
+              const filePath = typeof parsedArgs.path === 'string' ? parsedArgs.path : '';
+              const lang = detectLanguageFromPath(filePath) || 'typescript';
+              const icon = getLanguageIcon(lang);
+              const edits = Array.isArray(parsedArgs.edits) ? parsedArgs.edits : [];
+
+              return (
+                <div className="tool-section tool-section-edits">
+                  <div className="tool-code-header">
+                    <div className="tool-code-header-left">
+                      <span className="tool-code-icon" aria-hidden="true">{icon}</span>
+                      <span className="tool-code-path">{filePath || 'archivo'}</span>
+                      {lang && <span className="tool-code-lang-badge">{lang}</span>}
+                      <span className="tool-code-lines">
+                        {edits.length} {edits.length === 1 ? 'edición' : 'ediciones'}
+                      </span>
+                    </div>
+                  </div>
+                  {edits.map((edit: any, eIdx: number) => (
+                    <div key={eIdx} className="tool-edit-block">
+                      {edit.oldText && (
+                        <div className="tool-diff-box diff-old">
+                          <span className="diff-tag">− {t('activity.edit_old')}</span>
+                          <pre className="tool-code-pre">
+                            <code dangerouslySetInnerHTML={{ __html: highlightCode(edit.oldText, lang, 'picolor') }} />
+                          </pre>
+                        </div>
+                      )}
+                      {edit.newText && (
+                        <div className="tool-diff-box diff-new">
+                          <span className="diff-tag">+ {t('activity.edit_new')}</span>
+                          <pre className="tool-code-pre">
+                            <code dangerouslySetInnerHTML={{ __html: highlightCode(edit.newText, lang, 'picolor') }} />
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            }
+
+            // 3. Specialized formatted view for "read" (Syntax-highlights read output)
+            if (toolName === 'read' && parsedArgs) {
+              const filePath = typeof parsedArgs.path === 'string' ? parsedArgs.path : '';
+              const lang = detectLanguageFromPath(filePath);
+              const icon = getLanguageIcon(lang);
+              const highlightedOutput = output ? highlightCode(output, lang, 'picolor') : '';
+
+              return (
+                <div className="tool-section tool-section-code">
+                  <div className="tool-code-header">
+                    <div className="tool-code-header-left">
+                      <span className="tool-code-icon" aria-hidden="true">{icon}</span>
+                      <span className="tool-code-path">{filePath || 'archivo'}</span>
+                      {lang && <span className="tool-code-lang-badge">{lang}</span>}
+                    </div>
+                    {output && (
+                      <button
+                        type="button"
+                        className="tool-copy-btn"
+                        onClick={handleCopyOutput}
+                        aria-label={t('activity.copy_output')}
                       >
-                        <path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z" />
-                        <path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z" />
-                      </svg>
-                      <span>{t('activity.copy_output')}</span>
-                    </>
-                  )}
-                </button>
-              )}
-            </div>
+                        {copyFeedback ? (
+                          <span className="tool-copied-text">{copyFeedback}</span>
+                        ) : (
+                          <span>{t('activity.copy_output')}</span>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                  <div className="tool-code-container">
+                    {output ? (
+                      <pre className="tool-code-pre">
+                        <code dangerouslySetInnerHTML={{ __html: highlightedOutput }} />
+                      </pre>
+                    ) : (
+                      <span className="tool-output-empty">{t('activity.no_output')}</span>
+                    )}
+                  </div>
+                </div>
+              );
+            }
 
-            <div className="tool-output-container">
-              {output.length > 0 ? (
-                <pre className="tool-output-pre">{output}</pre>
-              ) : status === 'running' ? (
-                <span className="tool-output-empty running">
-                  {t('activity.tool_status_running')}...
-                </span>
-              ) : (
-                <span className="tool-output-empty">
-                  {t('activity.no_output')}
-                </span>
-              )}
-            </div>
-          </div>
+            // 4. Specialized view for command tools (bash, sh, powershell)
+            if (
+              (toolName === 'bash' || toolName === 'powershell' || toolName === 'sh' || toolName === 'terminal') &&
+              parsedArgs &&
+              typeof parsedArgs.command === 'string'
+            ) {
+              const command = parsedArgs.command;
+              const highlightedCmd = highlightCode(command, 'bash', 'picolor');
+              return (
+                <div className="tool-terminal-wrapper">
+                  <div className="terminal-command-bar">
+                    <span className="terminal-prompt-glyph" aria-hidden="true">$</span>
+                    <code className="terminal-command-text" dangerouslySetInnerHTML={{ __html: highlightedCmd }} />
+                  </div>
+                  <div className="terminal-header">
+                    <span className="terminal-title">{t('activity.output')}</span>
+                    {output && (
+                      <button
+                        type="button"
+                        className="tool-copy-btn"
+                        onClick={handleCopyOutput}
+                        aria-label={t('activity.copy_output')}
+                      >
+                        {copyFeedback ? <span className="tool-copied-text">{copyFeedback}</span> : <span>{t('activity.copy_output')}</span>}
+                      </button>
+                    )}
+                  </div>
+                  <div className="terminal-screen">
+                    <pre className="terminal-stdout">{output || t('activity.no_output')}</pre>
+                  </div>
+                </div>
+              );
+            }
+
+            // 5. Generic tools fallback: formatted arguments and output
+            return (
+              <>
+                {fullArgs && (
+                  <div className="tool-section tool-section-args">
+                    <span className="tool-section-label">{t('activity.arguments')}</span>
+                    <pre className="tool-args-pre">
+                      <code dangerouslySetInnerHTML={{ __html: highlightCode(fullArgs, 'json', 'picolor') }} />
+                    </pre>
+                  </div>
+                )}
+
+                <div className="tool-section tool-section-output">
+                  <div className="tool-output-header">
+                    <span className="tool-section-label">{t('activity.output')}</span>
+                    {(output.length > 0 || fullArgs.length > 0) && (
+                      <button
+                        type="button"
+                        className="tool-copy-btn"
+                        onClick={handleCopyOutput}
+                        aria-label={t('activity.copy_output')}
+                      >
+                        {copyFeedback ? (
+                          <span className="tool-copied-text">{copyFeedback}</span>
+                        ) : (
+                          <span>{t('activity.copy_output')}</span>
+                        )}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="tool-output-container">
+                    {output.length > 0 ? (
+                      <pre className="tool-output-pre">{output}</pre>
+                    ) : status === 'running' ? (
+                      <span className="tool-output-empty running">
+                        {t('activity.tool_status_running')}...
+                      </span>
+                    ) : (
+                      <span className="tool-output-empty">
+                        {t('activity.no_output')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
     </div>
   );
-};
+});

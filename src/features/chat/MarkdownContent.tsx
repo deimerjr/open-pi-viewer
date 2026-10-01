@@ -9,6 +9,7 @@ import {
   type InlineNode,
   type ListItemNode,
 } from '@core/markdown';
+import { highlightCode } from '@core/picolor';
 import {
   getLinkAriaLabel,
   getLinkModifierLabel,
@@ -22,6 +23,126 @@ export {
   getLinkModifierLabel,
   getLinkOpenLiveStatusText,
   shouldRenderAsMarkdown,
+};
+
+export const LANG_ICONS: Record<string, string> = {
+  ts: '', typescript: '', tsx: '', mts: '', cts: '',
+  js: '', javascript: '', jsx: '', mjs: '', cjs: '',
+  go: '', golang: '',
+  rs: '', rust: '',
+  py: '', python: '',
+  rb: '', ruby: '',
+  java: '', kt: '󱈙', kotlin: '󱈙', scala: '',
+  c: '', h: '', cpp: '', cxx: '', hpp: '', cs: '󰌛', csharp: '󰌛',
+  php: '',
+  sh: '', bash: '', zsh: '', shell: '', fish: '', powershell: '󰨊',
+  html: '', css: '', scss: '', sass: '', less: '',
+  json: '󰘦', jsonc: '󰘦', yaml: '󰘦', yml: '󰘦', toml: '󰘦', xml: '󰗀',
+  dockerfile: '󰡨', docker: '󰡨', makefile: '', make: '',
+  diff: '', patch: '', git: '',
+  sql: '',
+  lua: '', zig: '', swift: '', dart: '', elixir: '',
+  md: '', markdown: '',
+  text: '󰈙', txt: '󰈙', plain: '󰈙', log: '󰈙',
+};
+
+export function getLanguageIcon(lang?: string): string {
+  if (!lang) return '󰅪';
+  const clean = lang.toLowerCase();
+  return LANG_ICONS[clean] || '󰅪';
+}
+
+/**
+ * Renders a crisp vector SVG icon for code block headers.
+ * Avoids broken tofu/square glyphs on operating systems without patched Nerd Fonts.
+ */
+export const LanguageIcon: React.FC<{ lang?: string }> = ({ lang }) => {
+  const clean = (lang || '').toLowerCase();
+
+  // Terminal / Shell
+  if (['sh', 'bash', 'zsh', 'shell', 'fish', 'powershell', 'ps1', 'terminal', 'console'].includes(clean)) {
+    return (
+      <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="4 17 10 11 4 5" />
+        <line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    );
+  }
+
+  // Diffs / Git
+  if (['diff', 'patch', 'git', 'gitcommit', 'gitrebase'].includes(clean)) {
+    return (
+      <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="18" cy="18" r="3" />
+        <circle cx="6" cy="6" r="3" />
+        <path d="M13 6h3a2 2 0 0 1 2 2v7" />
+        <line x1="6" y1="9" x2="6" y2="21" />
+      </svg>
+    );
+  }
+
+  // Rust
+  if (clean === 'rs' || clean === 'rust') {
+    return (
+      <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </svg>
+    );
+  }
+
+  // JSON / Data / Config
+  if (['json', 'jsonc', 'yaml', 'yml', 'toml', 'xml'].includes(clean)) {
+    return (
+      <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5a2 2 0 0 0 2 2h1" />
+        <path d="M16 21h1a2 2 0 0 0 2-2v-5a2 2 0 0 1 2-2 2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" />
+      </svg>
+    );
+  }
+
+  // Database / SQL
+  if (['sql', 'pgsql', 'mysql', 'sqlite'].includes(clean)) {
+    return (
+      <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      </svg>
+    );
+  }
+
+  // Markdown / Docs
+  if (['md', 'markdown', 'mdown'].includes(clean)) {
+    return (
+      <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+        <polyline points="9 15 12 18 15 15" />
+        <line x1="12" y1="12" x2="12" y2="18" />
+      </svg>
+    );
+  }
+
+  // Code / General programming (TypeScript, JavaScript, Go, Python, C++, Java, etc.)
+  if (['ts', 'typescript', 'tsx', 'js', 'javascript', 'jsx', 'go', 'golang', 'py', 'python', 'java', 'c', 'cpp', 'cs', 'php', 'rb', 'ruby', 'html', 'css'].includes(clean)) {
+    return (
+      <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="16 18 22 12 16 6" />
+        <polyline points="8 6 2 12 8 18" />
+      </svg>
+    );
+  }
+
+  // Default / Plaintext
+  return (
+    <svg className="code-lang-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="16" y1="13" x2="8" y2="13" />
+      <line x1="16" y1="17" x2="8" y2="17" />
+    </svg>
+  );
 };
 
 /**
@@ -79,23 +200,47 @@ export function getCopyLiveStatusText(
 
 export interface MarkdownContentProps {
   content: string;
+  onInsertPrompt?: (code: string, fileName?: string, lang?: string) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}
+
+export interface CodeBlockProps {
+  code: string;
+  language?: string;
+  fileName?: string;
+  title?: string;
+  isDiff?: boolean;
+  onInsertPrompt?: (code: string, fileName?: string, lang?: string) => void;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }
 
 /**
- * Fenced code block with header, sanitized language indicator, and localized copy button.
- * The copy button resides strictly in the header outside <pre><code> to prevent capturing
- * button text during user text selection of code.
+ * Fenced code block with header, language/file indicator, line count, PiColor
+ * highlighting, and localized copy / insert-in-prompt actions.
  */
-export const CodeBlock: React.FC<{
-  code: string;
-  language?: string;
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
-}> = ({ code, language, t }) => {
+export const CodeBlock: React.FC<CodeBlockProps> = React.memo(({
+  code,
+  language,
+  fileName,
+  title,
+  isDiff,
+  onInsertPrompt,
+  t,
+}) => {
   const { status, triggerCopy } = useCopyFeedback();
 
   const sanitizedLang = sanitizeLanguage(language);
   const displayLang = sanitizedLang || t('markdown.code_plain');
+  const displayTitle = fileName || title;
+
+  const lineCount = React.useMemo(() => {
+    return code ? code.split('\n').length : 0;
+  }, [code]);
+
+  const linesBadge =
+    lineCount === 1
+      ? t('markdown.lines_count_one')
+      : t('markdown.lines_count', { count: lineCount });
 
   const copyLabel =
     status === 'copied'
@@ -104,22 +249,59 @@ export const CodeBlock: React.FC<{
         ? t('markdown.copy_failed')
         : t('markdown.copy_code');
 
-  const ariaLabel = getCodeCopyAriaLabel(status, displayLang, t);
+  const ariaLabel = getCodeCopyAriaLabel(status, displayTitle || displayLang, t);
   const liveStatus = getCopyLiveStatusText(status, t);
 
+  const highlightedHtml = React.useMemo(() => {
+    try {
+      return highlightCode(code, sanitizedLang, 'picolor');
+    } catch {
+      return '';
+    }
+  }, [code, sanitizedLang]);
+
   return (
-    <div className="markdown-code-block">
+    <div className={`markdown-code-block${isDiff ? ' is-diff' : ''}`}>
       <div className="markdown-code-header">
-        <span className="markdown-code-language">{displayLang}</span>
-        <button
-          type="button"
-          className="markdown-code-copy-btn"
-          onClick={() => void triggerCopy(code)}
-          aria-label={ariaLabel}
-          title={copyLabel}
-        >
-          {copyLabel}
-        </button>
+        <div className="markdown-code-header-left">
+          <span className="markdown-code-icon" aria-hidden="true">
+            <LanguageIcon lang={sanitizedLang} />
+          </span>
+          {displayTitle ? (
+            <span className="markdown-code-filename" title={displayTitle}>
+              {displayTitle}
+            </span>
+          ) : (
+            <span className="markdown-code-language">{displayLang}</span>
+          )}
+          {displayTitle && sanitizedLang && (
+            <span className="markdown-code-lang-badge">{sanitizedLang}</span>
+          )}
+          <span className="markdown-code-lines">{linesBadge}</span>
+        </div>
+        <div className="markdown-code-header-actions">
+          {onInsertPrompt && !isDiff && (
+            <button
+              type="button"
+              className="markdown-code-action-btn markdown-code-insert-btn"
+              onClick={() => onInsertPrompt(code, fileName, sanitizedLang)}
+              aria-label={t('markdown.insert_prompt_aria', { lang: displayTitle || displayLang })}
+              title={t('markdown.insert_prompt')}
+            >
+              <span className="action-btn-icon" aria-hidden="true">↵</span>
+              <span>{t('markdown.insert_prompt')}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="markdown-code-action-btn markdown-code-copy-btn"
+            onClick={() => void triggerCopy(code)}
+            aria-label={ariaLabel}
+            title={copyLabel}
+          >
+            {copyLabel}
+          </button>
+        </div>
         {liveStatus && (
           <span
             role="status"
@@ -141,11 +323,18 @@ export const CodeBlock: React.FC<{
         )}
       </div>
       <pre className="markdown-code-pre">
-        <code className="markdown-code-text">{code}</code>
+        {highlightedHtml ? (
+          <code
+            className="markdown-code-text"
+            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          />
+        ) : (
+          <code className="markdown-code-text">{code}</code>
+        )}
       </pre>
     </div>
   );
-};
+});
 
 /**
  * Safe link component:
@@ -166,7 +355,17 @@ export const MarkdownLink: React.FC<{
     error: openError,
     handleClick,
     handleKeyDown,
-  } = useLinkOpener(href);
+  } = useLinkOpener(href, { requireModifier: false });
+
+  const isAutolink = React.useMemo(() => {
+    if (typeof children === 'string') {
+      return children.trim() === href.trim();
+    }
+    if (Array.isArray(children) && children.length === 1 && typeof children[0] === 'string') {
+      return children[0].trim() === href.trim();
+    }
+    return false;
+  }, [children, href]);
 
   const copyLabel =
     copyStatus === 'copied'
@@ -192,8 +391,8 @@ export const MarkdownLink: React.FC<{
 
   const linkTitle =
     openStatus === 'failed' && openError
-      ? `${href} (${linkHint}) — ${t('markdown.open_failed')}: ${openError}`
-      : `${href} (${linkHint})`;
+      ? `${href} — ${t('markdown.open_failed')}: ${openError}`
+      : href;
 
   return (
     <span className="markdown-link-wrapper">
@@ -210,20 +409,24 @@ export const MarkdownLink: React.FC<{
       >
         {children}
       </span>
-      <span
-        className="markdown-link-destination"
-        title={linkTitle}
-        onClick={handleClick}
-      >
-        ({href})
-      </span>
-      <span
-        className="markdown-link-hint"
-        title={linkTitle}
-        onClick={handleClick}
-      >
-        [{linkHint}]
-      </span>
+      {!isAutolink && (
+        <span
+          className="markdown-link-destination"
+          title={linkTitle}
+          onClick={handleClick}
+        >
+          ({href})
+        </span>
+      )}
+      {!isAutolink && (
+        <span
+          className="markdown-link-hint"
+          title={linkTitle}
+          onClick={handleClick}
+        >
+          [{linkHint}]
+        </span>
+      )}
       <button
         type="button"
         className="markdown-link-copy-btn"
@@ -322,7 +525,8 @@ function renderBlock(
   block: BlockNode,
   index: number,
   keyPrefix: string,
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+  onInsertPrompt?: (code: string, fileName?: string, lang?: string) => void
 ): React.ReactNode {
   const key = `${keyPrefix}-blk-${index}`;
   switch (block.type) {
@@ -356,6 +560,10 @@ function renderBlock(
           key={key}
           code={block.code}
           language={block.language}
+          fileName={block.fileName}
+          title={block.title}
+          isDiff={block.isDiff}
+          onInsertPrompt={onInsertPrompt}
           t={t}
         />
       );
@@ -376,6 +584,40 @@ function renderBlock(
         </ul>
       );
     }
+    case 'table': {
+      return (
+        <div key={key} className="markdown-table-wrapper">
+          <table className="markdown-table">
+            <thead>
+              <tr>
+                {block.headers.map((h, hIdx) => (
+                  <th
+                    key={`${key}-th-${hIdx}`}
+                    style={h.align ? { textAlign: h.align } : undefined}
+                  >
+                    {renderInline(h.children, `${key}-th-${hIdx}`, t)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, rIdx) => (
+                <tr key={`${key}-tr-${rIdx}`}>
+                  {row.map((cell, cIdx) => (
+                    <td
+                      key={`${key}-td-${rIdx}-${cIdx}`}
+                      style={cell.align ? { textAlign: cell.align } : undefined}
+                    >
+                      {renderInline(cell.children, `${key}-td-${rIdx}-${cIdx}`, t)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
   }
 }
 
@@ -383,12 +625,18 @@ function renderBlock(
  * Pure React component rendering a safe Markdown subset.
  * Raw HTML is escaped automatically by React JSX; no dangerouslySetInnerHTML is ever used.
  */
-export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, t }) => {
-  const ast = parseMarkdown(content);
+export const MarkdownContent: React.FC<MarkdownContentProps> = React.memo(({
+  content,
+  onInsertPrompt,
+  t,
+}) => {
+  const ast = React.useMemo(() => parseMarkdown(content), [content]);
 
   return (
     <div className="markdown-body">
-      {ast.children.map((block, idx) => renderBlock(block, idx, 'md', t))}
+      {ast.children.map((block, idx) =>
+        renderBlock(block, idx, 'md', t, onInsertPrompt)
+      )}
     </div>
   );
-};
+});

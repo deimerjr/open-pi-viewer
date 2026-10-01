@@ -1,5 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getEngramProjectPi, getEngramCloudStatusPi, enrollEngramProjectPi, type EngramCloudStatus } from '@infra/bridge';
+import {
+  getEngramProjectPi,
+  getEngramCloudStatusPi,
+  enrollEngramProjectPi,
+  getEngramObservationsPi,
+  type EngramCloudStatus,
+  type EngramObservation,
+} from '@infra/bridge';
 
 export interface UseEngramProjectOptions {
   cwd?: string;
@@ -13,6 +20,8 @@ export interface UseEngramProjectReturn {
   checkCloudStatus: () => Promise<EngramCloudStatus | null>;
   isEnrolling: boolean;
   enrollProject: () => Promise<boolean>;
+  observations: EngramObservation[];
+  refreshObservations: () => Promise<void>;
 }
 
 export function useEngramProject({ cwd }: UseEngramProjectOptions = {}): UseEngramProjectReturn {
@@ -20,6 +29,7 @@ export function useEngramProject({ cwd }: UseEngramProjectOptions = {}): UseEngr
   const [cloudStatus, setCloudStatus] = useState<EngramCloudStatus | null>(null);
   const [isCheckingCloud, setIsCheckingCloud] = useState(false);
   const [isEnrolling, setIsEnrolling] = useState(false);
+  const [observations, setObservations] = useState<EngramObservation[]>([]);
 
   const checkCloudStatus = useCallback(async (): Promise<EngramCloudStatus | null> => {
     setIsCheckingCloud(true);
@@ -70,6 +80,15 @@ export function useEngramProject({ cwd }: UseEngramProjectOptions = {}): UseEngr
     }
   }, [engramProject, cwd]);
 
+  const refreshObservations = useCallback(async () => {
+    try {
+      const list = await getEngramObservationsPi(engramProject ?? undefined, 15);
+      setObservations(list);
+    } catch {
+      setObservations([]);
+    }
+  }, [engramProject]);
+
   const refreshEngramProject = useCallback(async () => {
     try {
       const project = await getEngramProjectPi(cwd);
@@ -105,10 +124,18 @@ export function useEngramProject({ cwd }: UseEngramProjectOptions = {}): UseEngr
         const project = await getEngramProjectPi(cwd);
         if (!cancelled) {
           setEngramProject(project);
+          if (project) {
+            getEngramObservationsPi(project, 15)
+              .then((obs) => {
+                if (!cancelled) setObservations(obs);
+              })
+              .catch(() => {});
+          }
         }
       } catch {
         if (!cancelled) {
           setEngramProject(null);
+          setObservations([]);
         }
       }
     })();
@@ -125,6 +152,8 @@ export function useEngramProject({ cwd }: UseEngramProjectOptions = {}): UseEngr
     checkCloudStatus,
     isEnrolling,
     enrollProject,
+    observations,
+    refreshObservations,
   };
 }
 

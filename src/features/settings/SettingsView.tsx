@@ -20,8 +20,11 @@ import type { CustomProviderConfig } from '@core/types/providers';
 import { detectGentleShellPi, pickDirectoryPi, type DetectGentleShellPayload, type DetectGentleShellResult } from '@infra/bridge';
 import { SettingsSelect } from './components/SettingsSelect';
 import { CustomCommandsSection } from './components/CustomCommandsSection';
-import { ThemeCustomizer } from './components/ThemeCustomizer';
 import { COMMANDS, type CustomCommand } from '@core/commands';
+
+const ThemeCustomizer = React.lazy(() =>
+  import('./components/ThemeCustomizer').then((m) => ({ default: m.ThemeCustomizer }))
+);
 
 export interface SettingsViewProps {
   config: ConnectConfig;
@@ -803,18 +806,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {activeTab === 'theme' && (
         <div className="settings-tab-pane" role="tabpanel" aria-label={t('settings.tab_theme')}>
-          <ThemeCustomizer
-            currentTheme={preferences.theme}
-            onThemeChange={onThemeChange}
-            workAnimation={preferences.workAnimation}
-            onWorkAnimationChange={onWorkAnimationChange}
-            customTextColor={preferences.customTextColor}
-            customLabelColor={preferences.customLabelColor}
-            onCustomThemeColorsChange={onCustomThemeColorsChange}
-            customBackground={preferences.customBackground}
-            onCustomBackgroundChange={onCustomBackgroundChange}
-            t={t}
-          />
+          <React.Suspense fallback={<div className="settings-loading-pane">{t('status.connecting')}</div>}>
+            <ThemeCustomizer
+              currentTheme={preferences.theme}
+              onThemeChange={onThemeChange}
+              workAnimation={preferences.workAnimation}
+              onWorkAnimationChange={onWorkAnimationChange}
+              customTextColor={preferences.customTextColor}
+              customLabelColor={preferences.customLabelColor}
+              onCustomThemeColorsChange={onCustomThemeColorsChange}
+              customBackground={preferences.customBackground}
+              onCustomBackgroundChange={onCustomBackgroundChange}
+              t={t}
+            />
+          </React.Suspense>
         </div>
       )}
 

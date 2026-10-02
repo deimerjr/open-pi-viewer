@@ -16,6 +16,8 @@
   "status.detail_resumed_session": "Resumed session ({count} messages)",
 
   "header.active_model": "Active Model",
+  "header.zen_mode": "Zen Mode",
+  "header.zen_mode_title": "Toggle distraction-free Zen Focus Mode (Alt+Z)",
   "header.retry_title": "Retry Pi connection with applied settings",
   "header.new_title": "Start a new conversation (resets Pi session context)",
   "header.settings_title": "Settings",

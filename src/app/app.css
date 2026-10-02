@@ -81,6 +81,21 @@
   border-color: var(--border-active);
 }
 
+.btn-zen-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+
+.btn-zen-toggle.is-active {
+  background-color: var(--accent-primary);
+  color: #000000;
+  border-color: var(--accent-primary);
+  font-weight: 600;
+}
+
 /* App Workspace (Sidebar + Main Area) */
 .app-workspace {
   display: flex;

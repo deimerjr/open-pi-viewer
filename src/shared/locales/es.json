@@ -16,6 +16,8 @@
   "status.detail_resumed_session": "Sesión reanudada ({count} mensajes)",
 
   "header.active_model": "Modelo activo",
+  "header.zen_mode": "Modo Zen",
+  "header.zen_mode_title": "Alternar modo de concentración Zen sin distracciones (Alt+Z)",
   "header.retry_title": "Reintentar conexión con Pi usando la configuración aplicada",
   "header.new_title": "Iniciar una nueva conversación (restablece el contexto de sesión de Pi)",
   "header.settings_title": "Configuración",

@@ -771,14 +771,18 @@ export const App: React.FC = () => {
   const [isZenMode, setIsZenMode] = useState<boolean>(false);
 
   useEffect(() => {
-    if (!isZenMode) return;
-    const handleZenEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !showSettings && !profilesHook.isModalOpen) {
+    const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if (e.altKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        setIsZenMode((prev) => !prev);
+        return;
+      }
+      if (isZenMode && e.key === 'Escape' && !showSettings && !profilesHook.isModalOpen) {
         setIsZenMode(false);
       }
     };
-    window.addEventListener('keydown', handleZenEsc);
-    return () => window.removeEventListener('keydown', handleZenEsc);
+    window.addEventListener('keydown', handleGlobalShortcuts);
+    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
   }, [isZenMode, showSettings, profilesHook.isModalOpen]);
 
 
@@ -875,6 +879,18 @@ export const App: React.FC = () => {
             />
             <span className="status-label">{localizedStatusLabel}</span>
           </div>
+
+          <button
+            type="button"
+            className={`btn btn-secondary btn-sm btn-zen-toggle${isZenMode ? ' is-active' : ''}`}
+            onClick={() => setIsZenMode((prev) => !prev)}
+            title={t('header.zen_mode_title')}
+            aria-label={t('header.zen_mode')}
+            aria-pressed={isZenMode}
+          >
+            <span aria-hidden="true">🧘</span>
+            <span>{t('header.zen_mode')}</span>
+          </button>
 
           {canRetryConnection(state.connectionStatus) && (
             <button

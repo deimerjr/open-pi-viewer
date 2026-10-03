@@ -1,9 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, type ChildProcess, execSync } from 'node:child_process';
+import { spawn, type ChildProcess, execSync, execFileSync } from 'node:child_process';
 import type { ServerResponse } from 'node:http';
+import {
+  getHomeDir,
+  getBridgeConfig,
+  getAgnosticExecEnv,
+} from './config';
 
-const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '/home/hermes';
+const HOME_DIR = getHomeDir();
 const PI_AGENT_DIR = path.join(HOME_DIR, '.pi', 'agent');
 const SESSIONS_ROOT = path.join(PI_AGENT_DIR, 'sessions');
 
@@ -36,51 +41,150 @@ export function broadcastSse(event: string, payload: any) {
 // Pi CLI RPC Subprocess Manager
 // ---------------------------------------------------------------------------
 
-export function resolveCrossPlatformCwd(cwd: string): string {
-  if (!cwd) return cwd;
-  const trimmed = cwd.trim();
+export function resolveCrossPlatformCwd(cwd?: string | null): string {
+  const cfg = getBridgeConfig();
+  if (!cwd || !cwd.trim()) {
+    return cfg.baseWorkspace || process.cwd();
+  }
+  let trimmed = cwd.trim();
 
-  // If on Linux/POSIX host and path looks like a Windows drive letter
+  // Expand ~ or ~/ or ~\
+  const home = getHomeDir();
+  if (trimmed === '~') {
+    return home;
+  }
+  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+    trimmed = path.join(home, trimmed.slice(2));
+  }
+
+  // Windows Git Bash / MSYS format: /c/Users/... -> C:\Users\...
+  if (process.platform === 'win32' && /^\/[a-zA-Z]\//.test(trimmed)) {
+    const drive = trimmed[1].toUpperCase();
+    const rest = trimmed.slice(2).replace(/\//g, '\\');
+    trimmed = `${drive}:${rest}`;
+  }
+
+  // If path is a Windows-style path on POSIX host (e.g. C:\... or Z:\...)
   if (process.platform !== 'win32' && /^[a-zA-Z]:[\\\/]?/i.test(trimmed)) {
     const drive = trimmed[0].toUpperCase();
     const relPart = trimmed.slice(2).replace(/^[\\\/]+/, '').replace(/\\/g, '/');
 
-    // Drive Z: maps to Samba share [Desarrollos] (/home/hermes/Desarrollos)
-    if (drive === 'Z') {
-      const mapped = relPart ? path.join('/home/hermes/Desarrollos', relPart) : '/home/hermes/Desarrollos';
-      if (fs.existsSync(mapped)) {
-        return mapped;
-      }
-      if (fs.existsSync('/home/hermes/Desarrollos')) {
-        return mapped;
-      }
+    if (cfg.driveMappings && cfg.driveMappings[drive]) {
+      const mapped = relPart ? path.join(cfg.driveMappings[drive], relPart) : cfg.driveMappings[drive];
+      if (fs.existsSync(mapped)) return mapped;
     }
-
-    // Check under /home/hermes directly
-    const homeCandidate = relPart ? path.join('/home/hermes', relPart) : '/home/hermes';
+    // Fallback: check under home directory if folder exists
+    const homeCandidate = relPart ? path.join(home, relPart) : home;
     if (fs.existsSync(homeCandidate)) return homeCandidate;
   }
 
-  // If receiving a UNC path like \\192.168.18.110\Desarrollos\Prueba
+  // UNC path check on POSIX host
   if (process.platform !== 'win32' && /^([\\\/]{2})[^\/\\\s]+[\\\/]([^\\\/]+)[\\\/]?(.*)/.test(trimmed)) {
     const m = trimmed.match(/^([\\\/]{2})[^\/\\\s]+[\\\/]([^\\\/]+)[\\\/]?(.*)/);
-    if (m) {
-      const shareName = m[2];
-      const subPath = m[3] ? m[3].replace(/\\/g, '/') : '';
-      if (shareName.toLowerCase() === 'desarrollos') {
-        return subPath ? path.join('/home/hermes/Desarrollos', subPath) : '/home/hermes/Desarrollos';
+    if (m && cfg.uncMappings) {
+      const shareName = m[2].toLowerCase();
+      if (cfg.uncMappings[shareName]) {
+        const subPath = m[3] ? m[3].replace(/\\/g, '/') : '';
+        const mapped = subPath ? path.join(cfg.uncMappings[shareName], subPath) : cfg.uncMappings[shareName];
+        if (fs.existsSync(mapped)) return mapped;
       }
     }
   }
 
-  return cwd;
+  try {
+    return path.resolve(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+export function getAvailableDrives(): Array<{ name: string; path: string }> {
+  if (process.platform !== 'win32') return [];
+  const drives: Array<{ name: string; path: string }> = [];
+  const letters = 'CDEFGHIJKLMNOPQRSTUVWXYZAB';
+  for (const l of letters) {
+    const root = `${l}:\\`;
+    try {
+      if (fs.existsSync(root)) {
+        drives.push({ name: `Drive (${root})`, path: root });
+      }
+    } catch {}
+  }
+  return drives;
+}
+
+export function getFilesystemShortcuts(baseWorkspace: string): Array<{ name: string; path: string; windowsPath?: string }> {
+  const shortcuts: Array<{ name: string; path: string; windowsPath?: string }> = [];
+  const home = getHomeDir();
+  const cfg = getBridgeConfig();
+
+  // 1. Custom shortcuts from config
+  if (cfg.customShortcuts && Array.isArray(cfg.customShortcuts)) {
+    for (const sc of cfg.customShortcuts) {
+      if (sc.name && sc.path && fs.existsSync(sc.path)) {
+        shortcuts.push({
+          name: sc.name,
+          path: path.resolve(sc.path),
+          ...(process.platform === 'win32' ? { windowsPath: path.resolve(sc.path) } : {}),
+        });
+      }
+    }
+  }
+
+  // 2. Base workspace
+  if (baseWorkspace && fs.existsSync(baseWorkspace)) {
+    const baseName = path.basename(baseWorkspace) || 'Workspace';
+    shortcuts.push({
+      name: `Workspace (${baseName})`,
+      path: path.resolve(baseWorkspace),
+      ...(process.platform === 'win32' ? { windowsPath: path.resolve(baseWorkspace) } : {}),
+    });
+  }
+
+  // 3. User Home
+  if (fs.existsSync(home)) {
+    shortcuts.push({
+      name: `Home (${path.basename(home) || '~'})`,
+      path: home,
+      ...(process.platform === 'win32' ? { windowsPath: home } : {}),
+    });
+  }
+
+  // 4. Platform specific: Drives on Windows, Root and standard dirs on POSIX
+  if (process.platform === 'win32') {
+    const drives = getAvailableDrives();
+    for (const d of drives) {
+      shortcuts.push({
+        name: d.name,
+        path: d.path,
+        windowsPath: d.path,
+      });
+    }
+  } else {
+    shortcuts.push({
+      name: 'Root (/)',
+      path: '/',
+    });
+    const commonDirs = ['Projects', 'Development', 'Documents', 'workspace'];
+    for (const dirName of commonDirs) {
+      const p = path.join(home, dirName);
+      if (fs.existsSync(p)) {
+        shortcuts.push({
+          name: dirName,
+          path: p,
+        });
+      }
+    }
+  }
+
+  return shortcuts;
 }
 
 class PiRpcSession {
   private child: ChildProcess | null = null;
   private pending = new Map<string, { resolve: (val: any) => void; reject: (err: any) => void; timer: any }>();
   private stdoutBuffer = '';
-  public cwd: string = '/home/hermes/Desarrollos/PI-Viewer';
+  public cwd: string = getBridgeConfig().baseWorkspace || process.cwd();
   public sessionFile: string | null = null;
   public sessionId: string | null = null;
   public modelInfo: any = null;
@@ -113,29 +217,51 @@ class PiRpcSession {
     this.cwd = resolvedCwd;
     this.sessionFile = sessionFile || null;
 
-    const nodePath = '/home/hermes/.local/share/node-v22.23.2-linux-x64/bin/node';
-    const entrypoint =
-      '/home/hermes/.local/share/node-v22.23.2-linux-x64/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js';
+    const cfg = getBridgeConfig();
+    const nodePath = cfg.nodeExecutable;
+    const entrypoint = cfg.piCliPath;
 
-    const args = [entrypoint, '--mode', 'rpc', '--approve'];
-    if (this.sessionFile && fs.existsSync(this.sessionFile)) {
-      args.push('--session', this.sessionFile);
+    let childProc: ChildProcess | null = null;
+    const env = getAgnosticExecEnv();
+
+    if (entrypoint && fs.existsSync(entrypoint)) {
+      const args = [entrypoint, '--mode', 'rpc', '--approve'];
+      if (this.sessionFile && fs.existsSync(this.sessionFile)) {
+        args.push('--session', this.sessionFile);
+      }
+      try {
+        childProc = spawn(nodePath, args, {
+          cwd: this.cwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env,
+        });
+      } catch (err) {
+        console.warn('[Pi RPC spawn error]:', err);
+        childProc = null;
+      }
+    } else {
+      const args = ['--mode', 'rpc', '--approve'];
+      if (this.sessionFile && fs.existsSync(this.sessionFile)) {
+        args.push('--session', this.sessionFile);
+      }
+      try {
+        childProc = spawn('pi', args, {
+          cwd: this.cwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          shell: process.platform === 'win32',
+          env,
+        });
+      } catch (err) {
+        console.warn('[Pi RPC spawn error]:', err);
+        childProc = null;
+      }
     }
 
-    try {
-      this.child = spawn(nodePath, args, {
-        cwd: this.cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          ...SYSTEM_EXEC_ENV,
-        },
-      });
-    } catch (err) {
-      console.warn('[Pi RPC spawn error]:', err);
+    if (!childProc) {
       this.child = null;
       return;
     }
+    this.child = childProc;
 
     this.child.stdout?.on('data', (chunk) => {
       this.stdoutBuffer += chunk.toString();
@@ -155,7 +281,11 @@ class PiRpcSession {
     });
 
     this.child.stderr?.on('data', (chunk) => {
-      console.warn('[Pi CLI stderr]:', chunk.toString());
+      // Strip terminal OSC title and control codes that Pi CLI emits for terminal window title
+      const cleaned = chunk.toString().replace(/\x1b\][^\x07\x1b]*[\x07\x1b]/g, '').trim();
+      if (cleaned) {
+        console.warn('[Pi CLI stderr]:', cleaned);
+      }
     });
 
     this.child.on('exit', (code, signal) => {
@@ -170,10 +300,10 @@ class PiRpcSession {
       this.child = null;
     });
 
-    // Initial get_state handshake with 10s timeout
+    // Initial get_state handshake with 25s timeout (allows extension loading on cold start)
     const reqId = `init-${Date.now()}`;
     try {
-      const stateRes = await this.sendCommand({ id: reqId, type: 'get_state' }, 10000);
+      const stateRes = await this.sendCommand({ id: reqId, type: 'get_state' }, 25000);
       if (stateRes?.data) {
         this.sessionId = stateRes.data.sessionId || null;
         this.sessionFile = stateRes.data.sessionFile || null;
@@ -275,7 +405,7 @@ const sessionStatusMap = new Map<string, 'working' | 'completed' | 'waiting' | '
 
 let activeSessionFile: string | null = null;
 let activeSessionId: string | null = null;
-let activeCwd: string = '/home/hermes/Desarrollos/PI-Viewer';
+let activeCwd: string = getBridgeConfig().baseWorkspace || process.cwd();
 let activeModel = {
   provider: 'antigravity-cpa',
   id: 'Gem/gemini-3.8-flash-high',
@@ -462,23 +592,34 @@ export function discoverAllProjectsWithSessions() {
     }
 
     if (!realCwd) {
-      realCwd = '/' + name.slice(2, -2).replace(/-/g, '/');
+      const trimmed = name.slice(2, -2);
+      if (process.platform === 'win32') {
+        const parts = trimmed.split('-');
+        if (parts.length > 0 && parts[0].length === 1) {
+          realCwd = `${parts[0].toUpperCase()}:\\${parts.slice(1).join('\\')}`;
+        } else {
+          realCwd = path.join(HOME_DIR, trimmed);
+        }
+      } else {
+        realCwd = '/' + trimmed.replace(/-/g, '/');
+      }
     }
 
     if (!fs.existsSync(realCwd)) continue;
 
     const baseName = path.basename(realCwd) || 'Home';
+    const isHome = path.resolve(realCwd) === path.resolve(HOME_DIR);
     list.push({
       id: `proj-${name.slice(2, -2).toLowerCase()}`,
       path: realCwd,
-      customName: baseName === 'hermes' ? 'Hermes (Home)' : baseName,
+      customName: isHome ? `${baseName} (Home)` : baseName,
       sessionCount: files.length,
     });
   }
 
   list.sort((a, b) => {
-    if (a.path.includes('PI-Viewer')) return -1;
-    if (b.path.includes('PI-Viewer')) return 1;
+    if (a.path === activeCwd) return -1;
+    if (b.path === activeCwd) return 1;
     return b.sessionCount - a.sessionCount;
   });
 
@@ -1043,14 +1184,9 @@ export function discoverPiChains(): PiChain[] {
 // Engram Real Memory & Observations (Opción 2)
 // ---------------------------------------------------------------------------
 
-const ENGRAM_BIN = fs.existsSync('/home/hermes/.local/bin/engram')
-  ? '/home/hermes/.local/bin/engram'
-  : 'engram';
-
-const SYSTEM_EXEC_ENV = {
-  ...process.env,
-  PATH: `/home/hermes/.local/bin:/home/hermes/.cargo/bin:/home/hermes/.local/share/node-v22.23.2-linux-x64/bin:/home/hermes/.local/share/pnpm/bin:${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}`,
-};
+function getEngramBin(): string {
+  return getBridgeConfig().engramBinary;
+}
 
 const engramProjectCache = new Map<string, { project: string | null; expires: number }>();
 
@@ -1075,7 +1211,12 @@ export function getEngramProjectImpl(cwd?: string): string | null {
 
   if (!detected) {
     try {
-      const out = execSync(`${ENGRAM_BIN} stats`, { cwd: targetDir, encoding: 'utf8', timeout: 1500, env: SYSTEM_EXEC_ENV });
+      const out = execFileSync(getEngramBin(), ['stats'], {
+        cwd: targetDir,
+        encoding: 'utf8',
+        timeout: 1500,
+        env: getAgnosticExecEnv(),
+      });
       for (const line of out.split('\n')) {
         const trimmed = line.trim();
         if (trimmed.startsWith('Projects:')) {
@@ -1109,6 +1250,9 @@ export async function getEngramCloudStatusImpl(project?: string, cwd?: string) {
     return cloudStatusCache.data;
   }
 
+  const cfg = getBridgeConfig();
+  const defaultUrl = cfg.engramServerUrl || 'https://engram.example.com';
+
   // 1. Try local daemon API directly in < 5ms if available
   try {
     const controller = new AbortController();
@@ -1124,7 +1268,7 @@ export async function getEngramCloudStatusImpl(project?: string, cwd?: string) {
       const isEnrolled = daemonData?.reason_code !== 'blocked_unenrolled';
       const result = {
         configured: true,
-        serverUrl: 'https://engram.djromoro.com',
+        serverUrl: defaultUrl,
         authReady: true,
         enrolled: isEnrolled,
         daemonRunning: true,
@@ -1137,13 +1281,17 @@ export async function getEngramCloudStatusImpl(project?: string, cwd?: string) {
     }
   } catch {}
 
-  // 2. Fallback to CLI command with cached result
+  // 2. Fallback to CLI command with cached result (using execFileSync, no shell interpolation)
   try {
-    const cmd = p ? `${ENGRAM_BIN} cloud status --project ${p}` : `${ENGRAM_BIN} cloud status`;
-    const out = execSync(cmd, { encoding: 'utf8', timeout: 1500, env: SYSTEM_EXEC_ENV });
+    const args = p ? ['cloud', 'status', '--project', p] : ['cloud', 'status'];
+    const out = execFileSync(getEngramBin(), args, {
+      encoding: 'utf8',
+      timeout: 1500,
+      env: getAgnosticExecEnv(),
+    });
 
     const serverMatch = out.match(/Server:\s*(https?:\/\/[^\s]+)/i);
-    const serverUrl = serverMatch ? serverMatch[1] : 'https://engram.djromoro.com';
+    const serverUrl = serverMatch ? serverMatch[1] : defaultUrl;
     const isConfigured = out.includes('Cloud status: configured');
     const isEnrolled = out.includes('project is enrolled') || out.includes('Project enrollment: enrolled');
     const isDaemon = out.includes('Local daemon: running');
@@ -1163,7 +1311,7 @@ export async function getEngramCloudStatusImpl(project?: string, cwd?: string) {
   } catch {
     const fallback = {
       configured: true,
-      serverUrl: 'https://engram.djromoro.com',
+      serverUrl: defaultUrl,
       authReady: true,
       enrolled: false,
       daemonRunning: true,
@@ -1178,7 +1326,11 @@ export async function getEngramCloudStatusImpl(project?: string, cwd?: string) {
 export function enrollEngramProjectImpl(project?: string) {
   if (!project) return false;
   try {
-    execSync(`${ENGRAM_BIN} cloud enroll --project ${project}`, { encoding: 'utf8', timeout: 5000, env: SYSTEM_EXEC_ENV });
+    execFileSync(getEngramBin(), ['cloud', 'enroll', '--project', project], {
+      encoding: 'utf8',
+      timeout: 5000,
+      env: getAgnosticExecEnv(),
+    });
     return true;
   } catch {
     return false;
@@ -1191,7 +1343,11 @@ export function getEngramObservationsImpl(project?: string, limit = 20) {
   try {
     const pClause = project ? `AND project = '${project.replace(/'/g, "''")}'` : '';
     const sql = `SELECT json_group_array(json_object('id', id, 'title', title, 'type', type, 'content', content, 'project', project, 'scope', scope, 'created_at', created_at)) FROM (SELECT * FROM observations WHERE deleted_at IS NULL ${pClause} ORDER BY id DESC LIMIT ${limit});`;
-    const out = execSync(`sqlite3 "${dbPath}" "${sql}"`, { encoding: 'utf8' }).trim();
+    const out = execFileSync('sqlite3', [dbPath, sql], {
+      encoding: 'utf8',
+      timeout: 2000,
+      env: getAgnosticExecEnv(),
+    }).trim();
     if (out) return JSON.parse(out);
   } catch {}
   return [];
@@ -1372,23 +1528,26 @@ export function getAvailableModelsImpl() {
 export async function handleIpcCommand(cmd: string, args: any = {}) {
   switch (cmd) {
     case 'discover_environment': {
+      const cfg = getBridgeConfig();
+      const nodePath = cfg.nodeExecutable;
+      const piCli = cfg.piCliPath;
+      const isDiscovered = Boolean(piCli && fs.existsSync(piCli));
+
       return {
-        status: 'ready',
+        status: isDiscovered ? 'ready' : 'missing',
         entrypoint: {
-          status: 'discovered',
-          path: '/home/hermes/.local/share/node-v22.23.2-linux-x64/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js',
-          candidates: [
-            '/home/hermes/.local/share/node-v22.23.2-linux-x64/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js',
-          ],
-          message: null,
+          status: isDiscovered ? 'discovered' : 'missing',
+          path: piCli,
+          candidates: piCli ? [piCli] : [],
+          message: isDiscovered ? null : 'Pi CLI entrypoint not detected. Configure piCliPath in server/config.json or install globally.',
         },
         initialDirectory: {
           status: 'discovered',
           path: activeCwd,
           message: null,
         },
-        nodePath: '/home/hermes/.local/share/node-v22.23.2-linux-x64/bin/node',
-        issues: [],
+        nodePath,
+        issues: isDiscovered ? [] : ['missing_entrypoint'],
       };
     }
 
@@ -1685,11 +1844,27 @@ export async function handleIpcCommand(cmd: string, args: any = {}) {
 
         // 2. Append standard Pi session_info entry via Pi SessionManager
         try {
-          const { SessionManager } = require(
-            '/home/hermes/.local/share/node-v22.23.2-linux-x64/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js'
-          );
-          const mgr = SessionManager.open(sessionPath);
-          mgr.appendSessionInfo(newTitle);
+          const cfg = getBridgeConfig();
+          let sessionManagerModule: any = null;
+          if (cfg.piCliPath) {
+            const cliDir = path.dirname(cfg.piCliPath);
+            const candidates = [
+              path.join(cliDir, '..', 'core', 'session-manager.js'),
+              path.join(cliDir, '..', '..', 'core', 'session-manager.js'),
+            ];
+            for (const cand of candidates) {
+              if (fs.existsSync(cand)) {
+                sessionManagerModule = require(cand);
+                break;
+              }
+            }
+          }
+          if (sessionManagerModule?.SessionManager) {
+            const mgr = sessionManagerModule.SessionManager.open(sessionPath);
+            mgr.appendSessionInfo(newTitle);
+          } else {
+            throw new Error('SessionManager not found');
+          }
         } catch {
           // Fallback: manually append Pi-compatible session_info entry
           const content = fs.readFileSync(sessionPath, 'utf8');
@@ -2013,12 +2188,11 @@ export async function handleIpcCommand(cmd: string, args: any = {}) {
 
         let branchOut = 'main';
         try {
-          branchOut = execSync('git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main"', {
+          branchOut = execSync('git rev-parse --abbrev-ref HEAD', {
             cwd: targetCwd,
             encoding: 'utf8',
             timeout: 1000,
             stdio: ['ignore', 'pipe', 'ignore'],
-            shell: '/bin/bash',
           }).trim();
         } catch {}
 
@@ -2095,7 +2269,8 @@ export async function handleIpcCommand(cmd: string, args: any = {}) {
     }
 
     case 'pick_directory': {
-      return args.defaultPath || '/home/hermes/Desarrollos/';
+      const cfg = getBridgeConfig();
+      return args.defaultPath || activeCwd || cfg.baseWorkspace || getHomeDir();
     }
 
     case 'get_bridge_state': {
@@ -2108,9 +2283,10 @@ export async function handleIpcCommand(cmd: string, args: any = {}) {
 
     case 'browse_filesystem': {
       const payload = args.payload || args || {};
-      let requestedDir = payload.path ? resolveCrossPlatformCwd(payload.path) : (activeCwd || '/home/hermes');
+      const cfg = getBridgeConfig();
+      let requestedDir = payload.path ? resolveCrossPlatformCwd(payload.path) : (activeCwd || cfg.baseWorkspace || getHomeDir());
       if (!fs.existsSync(requestedDir)) {
-        requestedDir = fs.existsSync('/home/hermes/Desarrollos') ? '/home/hermes/Desarrollos' : '/home/hermes';
+        requestedDir = fs.existsSync(cfg.baseWorkspace) ? cfg.baseWorkspace : getHomeDir();
       }
 
       try {
@@ -2119,7 +2295,7 @@ export async function handleIpcCommand(cmd: string, args: any = {}) {
           requestedDir = path.dirname(requestedDir);
         }
       } catch {
-        requestedDir = '/home/hermes';
+        requestedDir = getHomeDir();
       }
 
       const canonicalDir = path.resolve(requestedDir);
@@ -2136,38 +2312,24 @@ export async function handleIpcCommand(cmd: string, args: any = {}) {
           if (e.name.startsWith('.') && e.name !== '.gentle-ai') continue;
           if (e.name === 'node_modules' || e.name === 'target' || e.name === 'dist' || e.name === '.git') continue;
           const full = path.join(canonicalDir, e.name);
-          let win: string | undefined = undefined;
-          if (full.startsWith('/home/hermes/Desarrollos')) {
-            const rel = full.slice('/home/hermes/Desarrollos'.length).replace(/^[\\\/]+/, '');
-            win = rel ? `Z:\\${rel.replace(/\//g, '\\')}` : 'Z:\\';
-          }
           folders.push({
             name: e.name,
             fullPath: full,
-            ...(win ? { windowsPath: win } : {}),
+            ...(process.platform === 'win32' ? { windowsPath: full } : {}),
           });
         }
       }
 
       folders.sort((a, b) => a.name.localeCompare(b.name));
 
-      let windowsPath: string | null = null;
-      if (canonicalDir.startsWith('/home/hermes/Desarrollos')) {
-        const rel = canonicalDir.slice('/home/hermes/Desarrollos'.length).replace(/^[\\\/]+/, '');
-        windowsPath = rel ? `Z:\\${rel.replace(/\//g, '\\')}` : 'Z:\\';
-      }
+      const windowsPath = process.platform === 'win32' ? canonicalDir : null;
 
       return {
         currentPath: canonicalDir,
         windowsPath,
         parentPath: parentDir,
         folders,
-        shortcuts: [
-          { name: 'Desarrollos (Z:\\)', path: '/home/hermes/Desarrollos', windowsPath: 'Z:\\' },
-          { name: 'Prueba (Z:\\Prueba)', path: '/home/hermes/Desarrollos/Prueba', windowsPath: 'Z:\\Prueba' },
-          { name: 'PI-Viewer', path: '/home/hermes/Desarrollos/PI-Viewer', windowsPath: 'Z:\\PI-Viewer' },
-          { name: 'Home (/home/hermes)', path: '/home/hermes' },
-        ],
+        shortcuts: getFilesystemShortcuts(cfg.baseWorkspace),
       };
     }
 

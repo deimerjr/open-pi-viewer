@@ -42,3 +42,4 @@ Thumbs.db
 /.pi
 /odd
 .mcp.json
+server/config.json
